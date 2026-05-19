@@ -28,27 +28,49 @@ SYMBOL  = A
 
 Maintain a Bayesian posterior over `(a, w)`, quote a passive bid/ask around
 the posterior expectation of the final settlement with a σ-scaled half-spread
-plus inventory skew, and snipe any book level mispriced by more than
-`taker_fee + buffer·σ`.
+plus inventory skew, opportunistically penny/dime inside the market's best
+when the per-fill margin stays positive, and snipe any book level mispriced
+by more than `taker_fee + buffer·σ`.
 
 ### Pieces (in `strategy.py`)
 
 1. **`Posterior`** — discrete grid over `(a, w)` built by MC from the prior.
-   Each reveal applies Bayes (support constraint + uniform likelihood `1/w`).
-   `predict_settle(running_sum, n_remaining)` returns `(mean, std)` of final
-   settlement via the law of total variance:
+   Each reveal applies Bayes (support constraint + **discrete-uniform**
+   likelihood `1/(w+1)` over integers `{a, ..., a+w}`; the `Var` term
+   correspondingly uses `w(w+2)/12`). `predict_settle(running_sum, n_remaining)`
+   returns `(mean, std)` of final settlement via the law of total variance:
    `Var = E[Var | a,w] + Var[E | a,w]`.
 
 2. **`Strategy.desired_quotes`** — `bid = fair - edge + skew`,
    `ask = fair + edge + skew`. `edge = max(min_edge, edge_per_sigma·σ)`,
-   `skew = -position·skew_per_unit`.
+   `skew = -position·skew_per_unit`. Then `_apply_penny` may step
+   `tight_step_inside_ticks` inside the market's best — only when (a) the
+   book cache is fresh, (b) we're not already at/inside the market's best,
+   (c) the stepped-in price is strictly tighter than our default, and
+   (d) it preserves `tight_floor_edge` against `fair + skew`. Skipping
+   the step is always safe (default quote is still a valid post).
 
 3. **`Strategy.maybe_snipe`** — taker IOC against any level with
    `mispricing > taker_fee + max(snipe_min_edge, snipe_buffer_sigma·σ)`.
-   Filters own resting prices client-side.
+   Filters own resting prices client-side. Refreshes the shared book cache
+   used by `_apply_penny`. Mid-round snipes count against
+   `max_snipes_per_round` (hard fee-runaway cap); the post-final-reveal
+   sweep is exempt.
 
-4. **`Strategy.on_quote_event`** — fires on every `quote_add` / `quote_cancel`
-   delta (see "exploit" below) and tries `maybe_snipe` immediately.
+4. **`Strategy._try_direct_snipe`** — fast-path IOC fired directly off a
+   `quote_add` WS event. No book fetch (~5-15ms vs ~50-100ms for the
+   book-scan path), so we beat competing snipers to fresh mispriced
+   quotes. Requires a FRESH `_book_cache` for the disagreement gate
+   (otherwise defers to the throttled path). Same other safety gates as
+   `maybe_snipe` (phase, min_reveals, rate cap, own-quote skip, position
+   cap, variance cap).
+
+5. **`Strategy.on_quote_event`** — fires on every `quote_add` /
+   `quote_cancel` delta. Two paths: (a) un-throttled direct snipe on
+   quote_add (naturally rate-limited by the mispricing gate); (b)
+   throttled (~10/sec) `maybe_snipe` plus reprice of maker quotes
+   (penny path) so a new top-of-book triggers a reprice within ~100ms.
+   `_reprice` is idempotent — unchanged prices don't churn the queue.
 
 ## Files in `day1/`
 
@@ -104,31 +126,84 @@ sharpening. Knobs have been re-tuned each time.
 
 ### Knob updates in `Strategy.__init__`
 
-Knobs have been re-tuned each session as the market evolved. Current values
-are in the rightmost column. Older columns are kept so the reasoning is visible.
+Knobs are re-derived after each session, but the **current** values come from
+fee economics — not from session-specific tuning — to avoid overfitting.
 
-| Knob | Initial | After 1st probe (spread 6) | After +629 session (spread 3) | **Current** (spread 2) |
-|---|---:|---:|---:|---:|
-| `quote_qty` | 10 | 5 | 5 | **5** |
-| `min_edge` | 1.5 | 2.5 | 1.5 | **1.0** |
-| `snipe_min_edge` | 0.5 | 1.5 | 1.0 | **0.5** |
-| `snipe_buffer_sigma` | 0.30 | 0.50 | 0.40 | **0.30** |
-| `skew_per_unit` | 0.10 | 0.15 | 0.20 | **0.20** |
-| `edge_per_sigma` | 0.25 | 0.30 | 0.25 | **0.22** |
-| `snipe_full_size_sigma` | — | — | 1.5 | **1.5** |
-| `snipe_book_depth` | — | — | 10 | **10** |
+| Knob | Initial | After 1st probe (spread 6) | After +629 session (spread 3) | After disaster session | After over-correction | After top-of-book rebalance | **Current** |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| `quote_qty` | 10 | 5 | 5 | 5 | 5 | 2 | **2** |
+| `min_edge` | 1.5 | 2.5 | 1.5 | 1.5 | 1.0 | 1.0 | **1.0** |
+| `snipe_min_edge` | 0.5 | 1.5 | 1.0 | 1.5 | 1.0 | 1.0 | **1.0** |
+| `snipe_buffer_sigma` | 0.30 | 0.50 | 0.40 | 0.60 | 0.60 | 0.40 | **0.40** |
+| `skew_per_unit` | 0.10 | 0.15 | 0.20 | 0.20 | 0.20 | 0.20 | **0.20** |
+| `edge_per_sigma` | 0.25 | 0.30 | 0.25 | 0.25 | 0.25 | 0.25 | **0.25** |
+| `snipe_book_depth` | — | — | 10 | 10 | 10 | 10 | **10** |
+| `tight_floor_edge` | — | — | — | 1.0 | 1.0 | 1.0 | **1.0** |
+| `tight_step_inside_ticks` | — | — | — | 1 | 1 | 1 | **1** |
+| `max_snipes_per_round` | — | — | — | 30 | 30 | 60 | **120** |
+| `snipe_max_qty_per_level` | — | — | — | — | — | — | **10** |
+| `min_reveals_to_quote` | 0 | 0 | 0 | 0 | 1 | 1 | **0** |
+| `pre_reveal_min_edge` | — | — | — | — | — | 10.0 | **4.0** |
+| `pre_reveal_pull_disagreement` | — | — | — | — | — | 15.0 | **10.0** |
+| `empty_side_edge` | — | — | — | — | — | — | **15.0** |
+| `quote_event_throttle_sec` | — | — | — | — | — | 0.10 | **0.05** |
+| `max_pos_target_sigma` | — | — | — | — | 2.0 | 2.0 | **2.0** |
+| `max_pos_floor` | — | — | — | — | 10 | 10 | **10** |
+| `max_pos_target_sigma_normal` | — | — | — | — | — | — | **3.0** |
+| `max_pos_floor_normal` | — | — | — | — | — | — | **15** |
+| `market_anchor_disagreement_min` | — | — | — | — | 5.0 | 5.0 | **5.0** |
+| `snipe_max_disagreement` | — | — | — | — | 10.0 | 10.0 | **10.0** |
+| `full_qty_sigma_max` | — | — | — | — | 3.0 | 3.0 | **3.0** |
+| `mid_round_quote_qty` | — | — | — | — | 2 | 1 | **1** |
+| `mid_round_quote_qty_normal` | — | — | — | — | — | — | **2** |
+| `quote_qty_normal` | — | — | — | — | — | — | **5** |
+| `tight_penny_min_reveals` | — | — | — | — | 2 | 1 | **0** |
+| `tight_penny_sigma_max` | — | — | — | — | 4.0 | 10.0 | **10.0** |
 
-**Why the current values:** median market spread is 2 ticks. `min_edge=1.0`
-keeps us competitive at top-of-book on each side without giving away more
-than `min_edge - maker_fee = 0.5` per lot. `snipe_min_edge=0.5` means
-`edge_required = taker_fee + 0.5 = 1.0` so 1-tick mispricings in a 2-tick
-market actually trigger (the previous 1.0 floor meant snipes almost never
-fired — only 4 of 78 fills in the +366 session were taker).
+Removed (folded into `snipe_max_qty_per_level`): `snipe_full_size_sigma`.
+
+**Why the current values (derived, not tuned):**
+
+- **`min_edge = 1.0`** = `maker_fee + 0.5` (positive expected per-fill margin
+  with a small adverse-selection buffer). At maker_fee=0.5 this means each
+  maker fill earns net ≥ 0.5 per lot.
+- **`tight_floor_edge = 1.0`** = the absolute minimum gross per-fill margin
+  we will ever quote — same derivation. The penny logic will not step
+  tighter than this even if the market does.
+- **`snipe_min_edge = 1.5` + `snipe_buffer_sigma = 0.60`** ⇒
+  `edge_required ≥ taker_fee + 1.5 = 2.0` ticks. The disaster session showed
+  that requiring only +0.5 over taker fee fires on 1-tick noise in a 2-tick
+  market and burns fees faster than the edge pays. 2.0 means we only snipe
+  genuine mispricings, not stochastic fluctuations.
+- **`max_snipes_per_round = 30`** is a hard ceiling against fee runaway if
+  the edge calc is wrong. The +366 session used 4 snipes; the disaster
+  session fired 100+. 30 is generous middle ground that still pages us before
+  we self-destruct. Reset on every `phase -> running` so it doesn't leak
+  across rounds.
 
 **Fee guardrail:** `quote_qty` stays at 5 (market median trade is 2-3 — going
 above 5 makes us the disproportionate target). Tighter spread does grow fill
 count, but each maker fill still earns roughly `min_edge - maker_fee = 0.5`
 net of fees, so volume is profitable.
+
+### Penny/dime (`_apply_penny`)
+
+When another trader is between our default quote and our `tight_floor_edge`,
+step `tight_step_inside_ticks` inside their best on that side. Designed to
+**only** activate when:
+
+- The book cache (refreshed by `maybe_snipe`) is < 1 second old.
+- We are not already at-or-better-than the market's best on that side
+  (preserves queue priority — don't undercut yourself).
+- The stepped-in price is strictly tighter than our default.
+- The stepped-in price still preserves `tight_floor_edge` against
+  `fair + skew` (so per-fill expected margin stays ≥ 0.5 net).
+
+This is reactive to live book state, not session-tuned. In a 2-tick market
+the penny condition often won't fire (we're already inside the market's best
+at our default `min_edge=1.0`), which is correct — there's no tighter price
+that still earns. In wider markets or when sigma temporarily widens our
+default, penny grabs the inside without sacrificing the floor.
 
 ### Structural changes in `Strategy`
 
@@ -147,9 +222,139 @@ net of fees, so volume is profitable.
 - **`cancel_all` on `phase -> running`**: prevents stale orders from the
   previous round being lifted instantly when a new round starts (this was the
   root cause of "instant -100" at game start).
-- **`min_reveals_to_quote = 1` and `min_reveals_to_snipe = 1`**: no quoting or
-  sniping from prior-only fair (the unconditional prior mean is biased
-  relative to the realized `(a, w)` and has wide uncertainty).
+- **`min_reveals_to_quote = 0`** (RE-ENABLED with explicit tail defense
+  and tightened to ride near the actual market spread). Pre-reveal MM
+  was previously disabled after a tail-prior round (reveals
+  14,14,14,12,14,13,12,12,14,12 → settle=131) caused **−5343** loss in
+  30s: our prior fair (~45) was far below market consensus (~60), so our
+  ask at 55 (= prior + edge=10) landed INSIDE the market bid of 58 →
+  marketable post → taker-filled at 58 → −73 per lot. Now re-enabled with
+  three layered protections that didn't exist before:
+  1. **Pre-reveal market_mid anchor** (extends existing K≥1 logic):
+     `desired_quotes` returns `(None, None)` if BOTH sides of the
+     pre-reveal book are empty (or the cache is stale). When at least
+     one side has a quote, the same `biased` clamp that protects K≥1
+     quotes runs pre-reveal too: ask = max(default_ask,
+     ceil(market_mid + edge)), bid = min(default_bid, floor(market_mid −
+     edge)). Widens quotes OUTSIDE the market spread — no more
+     inside-spread posts.
+  2. **`pre_reveal_pull_disagreement = 10.0`** (was 15.0): when
+     `market_mid > prior_fair + 10` (tail-UP suspected) the ASK is
+     suppressed entirely, not just widened. Symmetric for tail-DOWN.
+     Tightened from 15 because the `pre_reveal_min_edge` floor was
+     lowered from 10 to 4 — the safety margin shrunk, so we must catch
+     borderline disagreement sooner. The original disaster had
+     `|diff|=15` exactly; 10 catches it earlier.
+  3. **`empty_side_edge = 15.0`** (new): when ONE side of the pre-reveal
+     book is empty, quote the missing side `prior_fair ± 15` (extra
+     wide vs the default `prior_fair ± 4`). Log analysis showed empty-
+     side cases get filled within ~100ms by a walker with a wide-
+     marketable order, who pays the fat premium. The surviving side
+     still acts as a single-sided tail signal: high lone bid →
+     ASK pulled, low lone ask → BID pulled (same `pre_reveal_pull_
+     disagreement = 10` threshold).
+  Knob shift to ride inside the actual pre-reveal spread:
+  **`pre_reveal_min_edge = 4.0`** (was 10.0). Older-log analysis
+  across 6 rounds: other traders made 36-103 pre-reveal trades each
+  while we made 9 TOTAL (loss −26). The old `edge=10` parked us at
+  `prior ± 10`, way outside the typical 3-tick pre-reveal spread that
+  EVERYONE else lives inside. At `edge=4` we're at `prior ± 4`, inside
+  the median spread but with the three layered defenses above blocking
+  the disaster mode.
+- **Sigma-scaled position cap** (`max_pos_target_sigma=2.0`,
+  `max_pos_floor=10`, new): `_max_position_for_sigma(sigma)` returns
+  `position_limit` when `sigma ≤ 2.0`, else `max(floor, limit · 2.0 / sigma)`.
+  Applied in BOTH `desired_quotes` (suppress bid/ask when over cap) and
+  `maybe_snipe` (cap headroom for both ask-snipes and bid-snipes). The
+  intuition: each adverse-pickoff fill costs ~sigma ticks, so cap
+  inventory linearly in 1/sigma to bound worst-case loss to
+  `cap · sigma`. With `sigma=10`, cap=20; with `sigma=4`, cap=50. At
+  low sigma (well-formed posterior), full `position_limit` is available.
+- **Bias-aware cap relaxation** (`max_pos_target_sigma_normal=3.0`,
+  `max_pos_floor_normal=15`, new): when `market_mid` is fresh AND
+  `|fair − market_mid| < 5` (consensus confirms our fair, "relaxed"
+  regime), `_max_position_for_sigma(sigma, relaxed=True)` is used
+  instead, raising the cap. K=1 (sigma~8) goes from 25 → ~38; K=2
+  (sigma~6) from 33 → 50; pre-reveal floor from 10 → 15. Log
+  analysis of 3 recent rounds: max|pos| was 15 / 35 / 100 vs the
+  conservative cap of 25 (K=1) — the cap was BARELY binding in the
+  two settled rounds, leaving headroom unused, AND max-pos was NOT
+  correlated with worst-PnL rounds (tail-round had highest max-pos
+  *and* highest PnL). The relaxation only activates when we have
+  consensus-confirmation; in the biased / no-signal regime we fall
+  back to the conservative cap above. Passed through to `maybe_snipe`,
+  `_try_direct_snipe`, and `desired_quotes`.
+- **Bias-aware quote sizing** (`quote_qty_normal=5`,
+  `mid_round_quote_qty_normal=2`, new): per-quote size is the actual
+  volume bottleneck — log analysis showed 49 fills in a settled round
+  at avg|pos|=5, so we're getting fills but each is tiny. In the
+  same "relaxed" regime as above (market_mid confirms fair), upsize
+  to quote_qty=5 / mid_round=2 (from 2 / 1). Worst-case per-fill
+  adverse loss at qty=2, sigma=8 is 16 ticks vs 8 at qty=1 — still
+  small in absolute terms, and the bias detector blocks the regime
+  where this matters. `_current_quote_qty` consults market_mid itself
+  so `_post` / `_reprice` agree with the headroom check in
+  `desired_quotes`.
+- **Market-mid anchor** (`market_anchor_disagreement_min=5.0`, new):
+  when `|fair - market_mid| ≥ 5.0`, the posterior is likely biased (we
+  trust other traders' aggregate consensus over our prior in tail rounds).
+  In `desired_quotes`, ANCHOR widens quotes toward the market — bid
+  clamped down to `floor(market_mid - edge)`, ask clamped up to
+  `ceil(market_mid + edge)`. Penny is skipped in the biased regime
+  (its floors use our biased fair, so pennying near the market is
+  unsafe). Never tightens vs default — purely one-sided safety.
+- **Snipe disagreement gate** (`snipe_max_disagreement=10.0`, new):
+  when `|fair - market_mid| > 10.0` mid-round, `maybe_snipe` returns
+  False immediately. Our snipe edge calc uses our fair; in a biased
+  regime that fair is wrong, so a snipe would buy a stack of contracts
+  at "low" prices that are actually near truth (or sell at "high" prices
+  that are actually below truth). Post-final-reveal sweep is EXEMPT
+  (fair == settle exactly there, so disagreement IS profit).
+- **`min_reveals_to_snipe = 1`** (kept): sniping pre-reveal would burn fees
+  on prior-noise mispricings. Quoting is fine because the edge is large;
+  sniping requires confidence that a level is genuinely off.
+- **Cancel-all before each reveal**: `on_reveal` issues `cancel_all` BEFORE
+  calling `posterior.update(value)` (single REST round-trip vs two
+  individual cancels, sweeps any untracked stragglers). Other bots see the
+  same reveal we do; the window between posterior update and step()-driven
+  reprice is exactly when a faster taker can lift our order at the OLD
+  fair. Cost: queue priority on each reveal. Gain: immunity to fair-shift
+  pickoff (matters most on the first reveal where fair can shift ~10+
+  ticks as the K=1 posterior collapses out of the prior).
+- **`tight_penny_sigma_max = 4.0`**: penny logic disabled when uncertainty
+  is high. Pennying inside the market preserves only `tight_floor_edge=1.0`
+  of margin; with sigma=25 the next reveal can shift fair by ~10+ ticks,
+  far past that floor. Penny only fires once posterior has tightened.
+- **`tight_penny_min_reveals = 0`** (was 1): compete for top-of-book
+  even pre-reveal. Older-log analysis: inside-maker fills pay ~42%
+  more per fill than deeper fills, and other traders are making 36-103
+  pre-reveal trades / round while we sit deep (only 9 pre-reveal fills
+  total across 6 rounds). The `biased` gate (set when |fair −
+  market_mid| ≥ 5) still blocks penny in tail-prior rounds where our
+  anchor is wrong, and the pre-reveal pull-side defense additionally
+  suppresses the exposed side at |diff| ≥ 10. So penny pre-reveal only
+  fires when our prior is roughly in line with market consensus —
+  exactly when stepping inside is safe.
+- **`tight_penny_sigma_max = 10.0`** (rebalanced from 4.0): the old 4.0
+  threshold gated penny off at K=1 sigma (~8-9). Re-enabling penny at
+  K=1 unlocks fills in the highest-edge window of the round. The
+  `tight_floor_edge=1.0` floor still protects per-fill economics; the
+  sigma-scaled position cap still bounds cumulative exposure.
+- **Variance-scaled quote size** (`full_qty_sigma_max=3.0`,
+  `mid_round_quote_qty=1`): now qty=1 at K=1-2 (was 2). Combined with
+  `quote_qty=2` for low-sigma, the size profile is: K=0 → 1 (disabled),
+  K=1-2 → 1, K>=3 with tight posterior → 2. Each fill is small enough
+  that a wrong-direction sigma shift can't blow up the round; capture
+  comes from VOLUME (top-of-book + fast snipes), not per-fill size.
+- **"Join inside" fallback in `_apply_penny`**: when stepping inside
+  market best would violate `tight_floor_edge` but the market best
+  ITSELF is at-or-above our safe-quote floor, we JOIN the queue at the
+  inside instead of staying at the deeper default. Log analysis showed
+  recent sessions at top-of-ask only 7% of book snapshots — purely
+  because penny.step was rejected and we sat 1-2 ticks behind. Joining
+  trades queue-priority-at-deep-price for queue-tail-at-inside-price:
+  fewer-priority fills, but at the better price when sweeps walk
+  through.
 - **`quote_after_final_reveal = False`**: once all `N` reveals are in,
   `n_remaining = 0` and fair is the exact settlement (not theoretical).
   Quoting passive spread on a known value just gives away edge with no
@@ -169,6 +374,30 @@ net of fees, so volume is profitable.
   is known, every cent of mispricing on the visible book is risk-free profit.
 - **`Strategy.flatten`**: cancel-all then market-flatten. Wired to `q` /
   Ctrl-C exit and to the `f` interactive command.
+- **Per-snipe size cap** (`snipe_max_qty_per_level=10`, new): every snipe
+  takes ≤ 10 lots regardless of sigma. Replaces the old
+  `snipe_full_size_sigma=1.5` branch that used `position_limit=100` at low
+  sigma — that branch could slam our entire trader headroom into ONE bad
+  fair calc. Log analysis (3 sessions, 50% miss rate on bad trades) showed
+  bots repost the same mispriced quote multiple times (median rest >2s),
+  so coming back to a level is cheap. Each round we can fire up to 100
+  snipes (= 10 lots × 10 levels) and bots don't run out — they have no
+  position limit. The sigma-scaled `max_pos_for_sigma` still binds total
+  accumulation.
+- **`max_snipes_per_round=120`** (was 60): the disagreement gate plus
+  per-level qty cap together prevent fee-runaway, so the count cap can be
+  relaxed to let pattern-exploit volume through. Combined safety:
+  120 snipes × 10 qty = 1200 lots max, but `position_limit=100` binds
+  first — count cap is just a guard against runaway loops.
+- **Fair/sigma cache** (new): `fair_and_sigma` now caches its result by
+  generation; invalidated on `posterior.update` (in `on_reveal`) and
+  `posterior.reset` (in `on_phase_change`). Underlying `predict_settle`
+  iterates ~200-500 (a,w) posterior cells doing law-of-total-variance
+  math; cache hit replaces that with a single tuple lookup. Removes
+  4-6× redundant compute per WS event in the hot path
+  (desired_quotes → maybe_snipe → _try_direct_snipe → _current_quote_qty
+  → ...). Matters in a FIFO market where each spare millisecond is a
+  better queue position.
 
 ## How to reproduce / continue
 
@@ -234,12 +463,14 @@ python day1/simulation_mc.py --quick                # 50 × 3, ~few seconds
   the new `strategy.py` to confirm reduced fees and improved PnL. Re-run
   `analyze.py` on a fresh log after a session.
 - **The `on_quote_event` snipe path may be chatty.** Every quote_add triggers
-  a check. If REST volume becomes a problem, debounce or cache the last fair
-  for ~50ms inside `maybe_snipe`.
+  a check (throttled to 10/sec via `quote_event_throttle_sec=0.1`). The
+  handler now also reprices passive quotes via `_apply_target_quotes` (penny
+  path), but `_reprice` is idempotent so unchanged prices don't churn.
 - **Prior parameters are hardcoded.** The handout warns parameters may change.
   All four `*_LOGN_MU/SIGMA` constants live at the top of `strategy.py`;
   rebuild the `Posterior` if they change.
-- **`Posterior` likelihood uses `1/w` (continuous-uniform).** The reveals are
-  integers, so the strict likelihood is `1/(w+1)` (discrete-uniform). The
-  `ImprovedPosterior` in `simulation.py` uses the corrected version. Worth
-  porting that to live `strategy.py` if PnL still lags.
+- **Simulation does NOT exercise the live `Strategy` class.** `OurBot` and
+  `ImprovedBot` in `simulation.py` are parallel implementations, so
+  `simulation_mc.py` cannot validate changes to `strategy.py` directly. To
+  test new live-strategy logic, either port it to `ImprovedBot` or run a
+  short live session and inspect the log.
