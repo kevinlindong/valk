@@ -41,12 +41,79 @@ import requests
 import websockets
 
 
+class _TokenBucket:
+    """Thread-safe leaky-bucket rate limiter.
+
+    Why: the exchange enforces a hard 20 req/s cap per API key and answers
+    excess requests with `reject {reason: rate_limited}` plus a 3-second
+    cool-off during which we lose every snipe opportunity. We saw 3,246
+    such rejects across one analysis batch (91.7% on new orders). A
+    client-side bucket at slightly *under* the server cap eliminates the
+    lockout: when we'd otherwise burst past 20/s, we delay by a few ms
+    instead of forfeiting 3 seconds. Shared across all calling threads.
+    """
+
+    def __init__(self, rate: float, capacity: float):
+        self.rate = rate            # tokens per second refill
+        self.capacity = capacity    # max tokens (also burst size)
+        self.tokens = capacity
+        self.last_refill = time.monotonic()
+        self.lock = threading.Lock()
+
+    def _refill_locked(self) -> None:
+        now = time.monotonic()
+        elapsed = now - self.last_refill
+        if elapsed > 0:
+            self.tokens = min(self.capacity, self.tokens + elapsed * self.rate)
+            self.last_refill = now
+
+    def acquire(self, timeout: float = 5.0) -> bool:
+        """Block until a token is available, up to `timeout` seconds.
+        Returns True on success, False on timeout. We sleep in small slices
+        so the wait-time tracks closely to bucket refill granularity."""
+        deadline = time.monotonic() + timeout
+        while True:
+            with self.lock:
+                self._refill_locked()
+                if self.tokens >= 1.0:
+                    self.tokens -= 1.0
+                    return True
+                # how long until we'd have one token?
+                deficit = 1.0 - self.tokens
+                wait = deficit / self.rate
+            now = time.monotonic()
+            if now >= deadline:
+                return False
+            time.sleep(min(wait, deadline - now, 0.02))
+
+    def available(self) -> float:
+        """Current token count (snapshot). Callers race other threads but
+        the value is accurate enough to decide whether to skip non-critical
+        REST calls (e.g., redundant modifies) and reserve budget for snipes."""
+        with self.lock:
+            self._refill_locked()
+            return self.tokens
+
+
 class GameClient:
     def __init__(self, base_url: str, api_key: str):
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key
         self._ws_thread: Optional[threading.Thread] = None
         self._stop = threading.Event()
+        # requests.Session reuses the underlying TCP connection across calls,
+        # eliminating the per-call TCP handshake (~1-3ms LAN). At 20-50
+        # REST/sec on the hot path that saves serious latency vs competing
+        # FIFO actors.
+        self._session = requests.Session()
+        # API key is sent on every request; Content-Type is set automatically
+        # by requests when json=... is passed, so we only need the key here.
+        self._session.headers.update({"X-API-Key": self.api_key})
+        # Client-side rate limiter at slightly under the server's 20 req/s.
+        # Every REST method below acquires one token before hitting the wire.
+        # 18 req/s sustained + 20-token burst gives us full server bandwidth
+        # without the 3-second lockout from a `rate_limited` reject.
+        self._bucket = _TokenBucket(rate=18.0, capacity=20.0)
 
         # Callbacks — override on the instance
         self.on_fill: Callable[[dict], None] = lambda m: None
@@ -65,6 +132,12 @@ class GameClient:
 
     def _headers(self) -> dict:
         return {"X-API-Key": self.api_key, "Content-Type": "application/json"}
+
+    def tokens_available(self) -> float:
+        """Snapshot of how many REST tokens are free right now. Strategies
+        can call this to skip non-critical writes (e.g., maker requotes)
+        and reserve budget for high-edge actions like IOC snipes."""
+        return self._bucket.available()
 
     def buy(
         self,
@@ -112,7 +185,8 @@ class GameClient:
             body["price"] = price
         if client_order_id is not None:
             body["client_order_id"] = client_order_id
-        r = requests.post(f"{self.base_url}/api/order", json=body, headers=self._headers())
+        self._bucket.acquire()
+        r = self._session.post(f"{self.base_url}/api/order", json=body)
         r.raise_for_status()
         return r.json()
 
@@ -135,26 +209,30 @@ class GameClient:
             body["price"] = price
         if qty is not None:
             body["qty"] = qty
-        r = requests.patch(
-            f"{self.base_url}/api/order/{order_id}", json=body, headers=self._headers()
+        self._bucket.acquire()
+        r = self._session.patch(
+            f"{self.base_url}/api/order/{order_id}", json=body
         )
         r.raise_for_status()
         return r.json()
 
     def cancel(self, order_id: int) -> dict:
-        r = requests.delete(f"{self.base_url}/api/order/{order_id}", headers=self._headers())
+        self._bucket.acquire()
+        r = self._session.delete(f"{self.base_url}/api/order/{order_id}")
         r.raise_for_status()
         return r.json()
 
     def cancel_all(self, symbol: Optional[str] = None) -> dict:
         params = {"symbol": symbol} if symbol else {}
-        r = requests.delete(f"{self.base_url}/api/orders", headers=self._headers(), params=params)
+        self._bucket.acquire()
+        r = self._session.delete(f"{self.base_url}/api/orders", params=params)
         r.raise_for_status()
         return r.json()
 
     def my_orders(self, symbol: Optional[str] = None) -> list:
         params = {"symbol": symbol} if symbol else {}
-        r = requests.get(f"{self.base_url}/api/orders", headers=self._headers(), params=params)
+        self._bucket.acquire()
+        r = self._session.get(f"{self.base_url}/api/orders", params=params)
         r.raise_for_status()
         return r.json()["orders"]
 
@@ -162,27 +240,32 @@ class GameClient:
         params: dict[str, Any] = {"depth": depth}
         if symbol:
             params["symbol"] = symbol
-        r = requests.get(f"{self.base_url}/api/book", params=params)
+        self._bucket.acquire()
+        r = self._session.get(f"{self.base_url}/api/book", params=params)
         r.raise_for_status()
         return r.json()
 
     def positions(self) -> dict:
-        r = requests.get(f"{self.base_url}/api/positions", headers=self._headers())
+        self._bucket.acquire()
+        r = self._session.get(f"{self.base_url}/api/positions")
         r.raise_for_status()
         return r.json()
 
     def game_state(self) -> dict:
-        r = requests.get(f"{self.base_url}/api/game")
+        self._bucket.acquire()
+        r = self._session.get(f"{self.base_url}/api/game")
         r.raise_for_status()
         return r.json()
 
     def instruments(self) -> dict:
-        r = requests.get(f"{self.base_url}/api/instruments")
+        self._bucket.acquire()
+        r = self._session.get(f"{self.base_url}/api/instruments")
         r.raise_for_status()
         return r.json()
 
     def leaderboard(self) -> list:
-        r = requests.get(f"{self.base_url}/api/leaderboard")
+        self._bucket.acquire()
+        r = self._session.get(f"{self.base_url}/api/leaderboard")
         r.raise_for_status()
         return r.json()["rows"]
 

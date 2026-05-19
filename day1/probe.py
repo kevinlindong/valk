@@ -284,6 +284,17 @@ class Probe:
         self.log("reveal", **msg)
         print(f"REVEAL #{msg.get('index')} = {msg.get('value')}  "
               f"running_sum={msg.get('running_sum')}")
+        # Snapshot the book just after the reveal for offline analysis. Fire
+        # in a daemon thread: in run_combined the strategy's on_reveal runs
+        # immediately after this and calls cancel_all -- any synchronous REST
+        # here would widen the adverse-pickoff window where a faster taker
+        # can lift our stale-priced orders at the OLD fair.
+        threading.Thread(
+            target=self._snapshot_book_after_reveal,
+            daemon=True,
+        ).start()
+
+    def _snapshot_book_after_reveal(self) -> None:
         try:
             book = self.c.book(self.symbol)
             self.log("book_after_reveal", **book)
@@ -349,13 +360,29 @@ class Probe:
         print(f"REJECT  {msg}")
 
     def on_message(self, msg: dict) -> None:
-        # NOTE: SDK calls on_message FIRST, then the typed handler -- so _touch
-        # here would double-count. Don't _touch from on_message.
+        # SDK calls on_message FIRST for every WS frame, then dispatches a
+        # typed handler (on_fill, on_trade, ...) for known types. We must
+        # skip those here or we'd double-log every fill/trade. Don't _touch
+        # either -- the typed handler will.
         t = msg.get("type")
-        known = {"fill", "trade", "book", "reveal", "game_state", "settlement",
+        typed = {"fill", "trade", "book", "reveal", "game_state", "settlement",
                  "order_ack", "cancel_ack", "modify_ack", "reject"}
-        if t not in known:
-            self.log("raw_unknown_msg", **msg)
+        if t in typed:
+            return
+        # Everything else: log under its actual type as the kind so jq filters
+        # like `select(.kind=="quote_add")` work cleanly. Empirically the
+        # exchange streams quote_add / quote_cancel / quote_fill / quote_modify
+        # (per-order book deltas) and a one-shot 'hello' greeting -- none of
+        # which appear in the handout (instructions hint: "not all exchange
+        # messages provided by the exchange are given in the notebook").
+        # Anything we haven't seen before is logged as raw_unknown_msg.
+        documented_untyped = {"quote_add", "quote_cancel", "quote_fill",
+                              "quote_modify", "hello"}
+        kind = t if t in documented_untyped else "raw_unknown_msg"
+        self.log(kind, **msg)
+        # Quote-* events fire many times per second and would flood the terminal.
+        # Only print truly novel types -- those are the ones worth investigating.
+        if t not in documented_untyped:
             print(f"RAW unknown type={t!r}  msg={msg}")
 
     # ---------- safety ----------

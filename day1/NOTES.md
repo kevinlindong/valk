@@ -142,7 +142,7 @@ fee economics — not from session-specific tuning — to avoid overfitting.
 | `tight_step_inside_ticks` | — | — | — | 1 | 1 | 1 | **1** |
 | `max_snipes_per_round` | — | — | — | 30 | 30 | 60 | **120** |
 | `snipe_max_qty_per_level` | — | — | — | — | — | — | **10** |
-| `min_reveals_to_quote` | 0 | 0 | 0 | 0 | 1 | 1 | **0** |
+| `min_reveals_to_quote` | 0 | 0 | 0 | 0 | 1 | 1 | **1** |
 | `pre_reveal_min_edge` | — | — | — | — | — | 10.0 | **4.0** |
 | `pre_reveal_pull_disagreement` | — | — | — | — | — | 15.0 | **10.0** |
 | `empty_side_edge` | — | — | — | — | — | — | **15.0** |
@@ -159,6 +159,10 @@ fee economics — not from session-specific tuning — to avoid overfitting.
 | `quote_qty_normal` | — | — | — | — | — | — | **5** |
 | `tight_penny_min_reveals` | — | — | — | — | 2 | 1 | **0** |
 | `tight_penny_sigma_max` | — | — | — | — | 4.0 | 10.0 | **10.0** |
+| `inv_dampen_threshold_frac` | — | — | — | — | — | — | **0.40** |
+| `inv_dampen_factor` | — | — | — | — | — | — | **0.0** |
+| `inv_hard_kill_frac` | — | — | — | — | — | — | **0.55** |
+| `snipe_adverse_extra_edge` | — | — | — | — | — | — | **1.5** |
 
 Removed (folded into `snipe_max_qty_per_level`): `snipe_full_size_sigma`.
 
@@ -313,6 +317,36 @@ default, penny grabs the inside without sacrificing the floor.
 - **`min_reveals_to_snipe = 1`** (kept): sniping pre-reveal would burn fees
   on prior-noise mispricings. Quoting is fine because the edge is large;
   sniping requires confidence that a level is genuinely off.
+- **Asymmetric inventory dampener** (`inv_dampen_threshold_frac=0.40`,
+  `inv_dampen_factor=0.0`, new): when `|position| > 0.40 * max_pos`, the
+  quote on the side that would ADD to the position is shrunk to 1 lot.
+  `_current_quote_qty(side)` consults `position` and the side, so the
+  bid and ask can carry different sizes. Sim round 2 (-950 baseline) and
+  round 23 (-470) showed the strategy filling 3-5 lots on the same side
+  for 4-5 reveals while a wrong-confident posterior held; this knob
+  caps that same-direction bleed without abandoning the profitable
+  market-make on the OPPOSITE side.
+- **Hard kill on adverse side** (`inv_hard_kill_frac=0.55`, new): a 1-lot
+  adverse quote still bled (many fills × 1 lot adds up). When
+  `|position| > 0.55 * max_pos`, the adverse-side quote is dropped to
+  `None` entirely. Skew + max_pos cap are softer defenses; this is the
+  hard backstop.
+- **Inventory-aware snipe edge** (`snipe_adverse_extra_edge=1.5`, new):
+  in both `maybe_snipe` and `_try_direct_snipe`, when a take would ADD
+  to existing position past `inv_dampen_threshold_frac`, require
+  `+1.5` ticks of additional edge. Defends against value_sniper-style
+  counterparties that pass us bad fills when we're already exposed.
+- **`min_reveals_to_quote = 1`** (changed from 0): pre-reveal MM was a
+  consistent net-negative in the sim — per-fill PnL of -1.46 (seed 1) to
+  -3.54 (seed 7) on the 195-245 fills we collected pre-reveal. With it
+  off, seed 7 mean PnL rose from +163 → +189 and worst-round from
+  -406 → -274. Pre-reveal sniping is still gated by `min_reveals_to_snipe=1`.
+- **`_apply_target_quotes` cross-aware ordering** (new): when the fair
+  jumps after a reveal and the new bid would cross the OLD resting ask
+  (or vice versa), cancel the would-be-crossed side first. Previously
+  the bid-first reprice fired `c.modify("bid", new_px)` which crossed
+  our own ask in the sim, eating 0.5/lot in fees; in production the
+  server rejects via SMP but at the cost of round-trips.
 - **Cancel-all before each reveal**: `on_reveal` issues `cancel_all` BEFORE
   calling `posterior.update(value)` (single REST round-trip vs two
   individual cancels, sweeps any untracked stragglers). Other bots see the
@@ -452,6 +486,282 @@ python day1/simulation.py --compare --rounds 100
 python day1/simulation_mc.py                        # 200 rounds × 10 seeds
 python day1/simulation_mc.py --quick                # 50 × 3, ~few seconds
 ```
+
+### Live-strategy simulation (`sim_strategy.py`)
+
+Unlike `simulation.py` / `simulation_mc.py` (which use parallel
+implementations), `sim_strategy.py` exercises the **actual** `Strategy`
+class through a mock `GameClient`. The matcher implements FIFO + SMP, the
+mock client returns the same shapes as the live SDK, and `strategy_mod.time`
+is monkey-patched to a deterministic clock so book-cache TTLs and warmup
+gates behave exactly as in production.
+
+```
+.venv/bin/python day1/sim_strategy.py --quick           # 10 rounds smoke
+.venv/bin/python day1/sim_strategy.py --rounds 50 --seed 1
+```
+
+Counterparties (`NoiseMM`, `TightMM`, `ValueSniper`) have *oracle* knowledge
+of the round's true (a, w) — they are an upper-bound stress test, the real
+field is partially uninformed. Logs are JSONL at
+`day1/logs/sim_log_<ts>.jsonl`, same schema as the live combined log.
+
+**Latest tuning gains** (50 rounds × 2 seeds, after self-cross fix,
+asymmetric inventory dampener, hard kill, snipe adverse-edge, and
+disabling pre-reveal MM):
+
+| Seed | Mean PnL | Median | Win % | Worst | VaR_5 |
+|------|---------:|-------:|------:|------:|------:|
+| baseline / 1 | +71 | +128 | 72% | -576 | -332 |
+| current / 1 | **+152** | **+229** | 74% | -754 | -258 |
+| baseline / 7 | +38 | +87 | 74% | -868 | -399 |
+| current / 7 | **+189** | **+244** | **88%** | **-274** | **-78** |
+
+### Directional snipe disagreement gate (2026-05-19)
+
+`combined_log_20260518_222323.jsonl` showed the round won +$239 but **210 fat
+bids (821 lots) at avg +7.9 ticks above settle went un-sniped** because the
+symmetric `snipe_max_disagreement = 10` gate blocked snipes in BOTH
+directions when our prior fair (~45) diverged from market_mid (~65-75). The
+market was wrong about truth (settle was 53), not us.
+
+Replaced the symmetric block with an asymmetric, conviction-aligned one:
+
+- `fair < market_mid - snipe_max_disagreement`: we trust the lower fair, so
+  BUY snipes are the wrong-direction bet (would be paying market-mid
+  prices) — block BUYS, allow SELLS into fat bids.
+- `fair > market_mid + snipe_max_disagreement`: symmetric — allow BUYS,
+  block SELLS.
+- New knob: `snipe_disagreement_directional = True` (set False to restore
+  the symmetric block as a quick rollback).
+
+Sim comparison (50 rounds × 3 seeds, gate off vs on, same code state):
+
+| Seed | Mode | Mean | Median | Win% | Worst | VaR_5 | Sum |
+|------|------|-----:|-------:|-----:|------:|------:|----:|
+| 0 | off | +99.6 | +139.2 | 70% | -602 | -278 | +4980 |
+| 0 | **on** | **+108.2** | **+145.0** | **72%** | **-598** | **-266** | **+5409** |
+| 1 | off | +74.0 | +117.8 | 68% | -763 | -335 | +3698 |
+| 1 | **on** | **+101.2** | **+132.8** | **72%** | -854 | **-287** | **+5059** |
+| 7 | off | +115.8 | +158.0 | 72% | -446 | -189 | +5791 |
+| 7 | **on** | **+144.3** | **+161.5** | **86%** | -521 | **-173** | **+7217** |
+
+Mean, median, win%, VaR_5, and total all improve across every seed; worst-
+case on seeds 1/7 widens by 75-90 ticks — acceptable given the systematic
+gains and that the inventory dampener + hard kill still bound exposure.
+
+## Latency / FIFO hardening (REST hot-path audit)
+
+The strategy ran several REST calls on the hot path that hurt FIFO standing
+against bot/human snipers. Each round-trip we save is one fewer ms a
+competitor's IOC reaches the server before ours. Changes:
+
+1. **`sdk/client.py` now uses `requests.Session()`** instead of bare
+   `requests.{get,post,patch,delete}` calls. Stock `requests` opens a fresh
+   TCP connection per request (no keep-alive); a Session reuses the same
+   connection, eliminating the TCP/handshake cost per call (~1-3ms on LAN).
+   At ~20-50 REST/sec on the hot path this is the single biggest FIFO win.
+   The API surface is unchanged.
+
+2. **`step()` no longer calls `game_state()` REST.** It now reads `self.phase`
+   directly. `on_phase_change` already keeps `self.phase` in sync from WS, so
+   the REST was pure overhead — paid on every fill, every reveal, every
+   status command.
+
+3. **`on_fill_event` no longer triggers `positions()` REST when the fill
+   matches one of our resting orders.** Position is updated locally from the
+   fill msg's side+qty. `step(reconcile=True)` is still used as a safety net
+   when the fill order_id doesn't match any local resting (i.e., IOC fills,
+   which already update position synchronously from the IOC response, or
+   races where `self.resting` hasn't caught up yet).
+
+Considered but not applied:
+
+- **Releasing `self.lock` around REST in `maybe_snipe` / `_try_direct_snipe`.**
+  Would let WS quote_add events land while a REST is in flight, but creates
+  position-cap-overshoot risk (we could fire a buy IOC for X lots while
+  another quote_add concurrently lifts the same level for Y, and both fills
+  arrive together). Session keep-alive already cut REST RTT to ~1-3ms; the
+  marginal benefit didn't justify the reentrance complexity. Revisit if
+  live logs show WS event queue backup symptoms (e.g., desired_quotes
+  reacting to old market_mid).
+
+- **In-memory book mirror from WS events.** `maybe_snipe` still calls
+  `c.book()` per throttled fire; a mirror updated by quote_add /
+  quote_cancel / trade WS events would eliminate it entirely. Bigger
+  change (~80 LOC), defer to a session where we can A/B vs the live
+  `c.book()` path.
+
+## Rate-limit suffocation fix (2026-05-19, evening)
+
+Analysis of the first 4 live sessions on the new probe (combined_log_20260519_*)
+turned up a single dominant bottleneck.
+
+**Findings (PnL over 5 settled rounds = +$2,069):**
+
+| Metric | Value |
+|---|---|
+| Rejects, all `rate_limited` | 3,246 across sessions |
+| Reject breakdown | **91.7% on new orders**, 4.1% modify, 4.1% cancel |
+| Server cap (from `game_state.rate_limit.max_per_second`) | 20 req/s, 3-sec cool-off on overshoot |
+| Median req-rate in the 1s before each lockout | 20.0 (we hammer right at the cap) |
+| Modify churn: pct firing <200 ms after prior modify on same order | 87.9% |
+| Snipe (taker) profit | 78/79 lots profitable, mean edge +9.2, +$688 |
+| Maker lots vs snipe lots | 1,219 vs 79 (snipes are 6.1% of volume, ~100% of edge) |
+| Missed-snipe opportunities (edge ≥10, no follow-up fill) | ~2,023 orders, ~10,732 lots |
+| Adverse counterparties | VALKE (−$267), VALKC (−$265), VARU (−$150) |
+| Favorable counterparties | VALKG (+$455), CHAR (+$393), VALKB (+$174) |
+
+All six symptoms collapse to the same root cause: we burn the 20 req/s budget
+on redundant maker requotes (87.9% of modifies fire within 200 ms of the
+previous one), so when a mispriced quote_add lands we're locked out and miss
+it. Fixes in this commit:
+
+1. **`sdk/client.py`: client-side `_TokenBucket(rate=18.0, capacity=20.0)`.**
+   Every REST call now `acquire()`s one token before hitting the wire. Sits
+   slightly under the server cap (18 vs 20) so we never trip the 3-second
+   server lockout — instead we self-throttle in 55-ms slices that are
+   recoverable. `tokens_available()` is exposed for caller-side prioritization.
+
+2. **`day1/strategy.py` `_reprice` per-order debounce.**
+   `min_modify_interval_sec = 0.25`. If we tried to modify the same
+   `order_id` within 250 ms of the previous successful modify, skip the
+   call. Reveal-driven repricing goes through `cancel_all` + fresh `_post`,
+   so it bypasses this debounce (the fair-shift path must not be throttled).
+
+3. **`_reprice` token-budget guard: skip when `tokens_available() < 3`.**
+   Reserves the last few tokens for an IOC snipe in case one shows up
+   immediately after. Snipes are 98.7% profitable in the analyzed logs;
+   maker requotes are not.
+
+Expected impact (back-of-envelope from the log numbers):
+- Modify traffic falls ~6× (median inter-modify gap was 62 ms vs 250 ms gate).
+- Frees ~12-15 tokens/sec for new orders + snipes.
+- If even 10% of the 2,023 missed-snipe opportunities convert at the median
+  edge, that's ~+$1k/session on top of the current ~+$400/round baseline.
+
+Outstanding (not in this commit): counterparty-aware quoting (widen vs
+VALKE/VALKC, tighten vs VALKG/CHAR). Requires online counterparty
+classification — defer until we have more fill data.
+
+## FIFO-priority retention fix (2026-05-19, late evening)
+
+Two fresh sessions (`combined_log_20260519_124658.jsonl`,
+`combined_log_20260519_125314.jsonl`) showed `kept_priority=False` on
+**99.6-99.8% of all modifies** (1853 modifies across the two sessions).
+Of those, **71.6-79.6% had identical `(price, qty)` to the prior known
+state** — yet they still made it past the existing guard
+`if rest["price"] == want_px and rest["qty"] == qty: return`.
+
+**Root cause:** the guard compares `rest["qty"]` (which we set to
+`o["remaining"]` after every post/modify) to `_current_quote_qty(side)`
+(the target post-size). After any partial fill `remaining < target`, so
+the guard never fires; we issue a "refill" modify each tick that resets
+qty back to target. Every refill loses queue priority. Sample trace
+(oid 313789, 5-lot bid @ 41, partial fill -1):
+
+```
+fill         px=41 qty=1
+modify_ack   px=41 qty=5 rem=4 kept=False    # refill: rest_qty (4) < target (5)
+modify_ack   px=41 qty=5 rem=4 kept=False    # 13+ more identical refills
+modify_ack   px=41 qty=5 rem=4 kept=False
+```
+
+**Fix:** widen the early-return in `_reprice` from `== qty` to `<= qty`:
+
+```python
+if rest["price"] == want_px and rest["qty"] <= qty:
+    return
+```
+
+At the same price, only allow modifies that *increase* priority retention
+— i.e. pure qty-DOWN (rest > target), which the docstring guarantees
+keeps the FIFO spot. Same-price refills are now skipped: the residual
+fills at preserved priority, and we only post a fresh quote when it
+fully fills. Price changes still flow through unchanged.
+
+Expected lift: 700-800 same-price modifies/session → ~0. Holding
+priority through partial fills means more fills per posted quote and
+fewer requote round-trips. Conservative est: +$36-75/round on top of
+the current +$1,053/round baseline; will be re-measured after fresh
+logs.
+
+## Probe / live-game logging fixes (2026-05-19)
+
+The probe's `on_message` catch-all was bucketing everything that the SDK
+doesn't typed-dispatch as `kind=raw_unknown_msg`. Counting `kind` values in
+`combined_log_20260518_222323.jsonl` (a representative live session):
+
+| kind                 | count   |
+|----------------------|---------|
+| **raw_unknown_msg**  | **13,233** |
+| trade                | 527     |
+| book_periodic        | 283     |
+| modify_ack           | 63      |
+| fill                 | 49      |
+| reveal               | 10      |
+| book_after_reveal    | 10      |
+| ...                  | ...     |
+
+Breaking down the `raw_unknown_msg` bucket by inner `type`:
+
+| type           | count |
+|----------------|-------|
+| quote_add      | 6,462 |
+| quote_cancel   | 6,235 |
+| quote_fill     | 527   |
+| quote_modify   | 8     |
+| hello          | 1     |
+
+So the exchange streams five message types that don't appear in the handout
+notebook (`day1_instructions.pdf` warns: *"not all exchange messages provided
+by the exchange are given in the notebook"*) — `quote_*` are per-order book
+deltas and `hello` is a one-shot greeting at WS connect. None had a typed
+SDK handler, so all 13k events landed in `raw_unknown_msg` with no usable
+`kind` for jq analysis.
+
+Fixes in `probe.py`:
+
+1. **`on_message`** now logs each documented-but-untyped event under its
+   actual type as the `kind` (so `kind=quote_add`, etc.) and only prints to
+   the terminal for *truly* novel types. `kind=raw_unknown_msg` is reserved
+   for genuinely unknown events — that's what should trigger investigation.
+   The five known untyped events are listed inline in code so future
+   discoveries get added there.
+
+2. **`on_reveal` book snapshot moved to a daemon thread.** The probe's
+   `book_after_reveal` REST fetch was synchronous, running BEFORE
+   `strat.on_reveal` in `run_combined`'s chained handler. Strategy's
+   `on_reveal` starts with `cancel_all()` — the longer that's delayed, the
+   wider the adverse-pickoff window where a faster taker can lift our
+   stale-priced quotes at the OLD fair. The snapshot still lands in the log
+   ~10ms later, which is fine for offline analysis but no longer blocks the
+   strategy.
+
+`run_combined.py` itself is already correctly wired: one shared WS
+connection (the exchange allows only one private WS per API key), chained
+handlers so every event reaches both probe (log) and strategy (trade),
+default log path `day1/logs/combined_log_<YYYYMMDD_HHMMSS>.jsonl`, and the
+probe's `_safety_check` is no-op'd because strategy owns position
+management.
+
+Analyze a fresh session:
+
+```
+jq -c 'select(.kind=="quote_add")'    day1/logs/combined_log_*.jsonl | head
+jq -c 'select(.kind=="quote_fill")'   day1/logs/combined_log_*.jsonl | head
+jq -c 'select(.kind=="raw_unknown_msg")' day1/logs/combined_log_*.jsonl
+```
+
+The third query should be empty in a healthy log; non-empty means a new
+message type appeared and the documented-untyped set in `probe.on_message`
+should be updated.
+
+Open question (not changed yet): `strategy.on_quote_event` reacts to
+`quote_add`/`quote_cancel` only. `quote_modify` (only 8 of them in the
+sample log, but each represents a price/qty change of a resting order)
+could also indicate a sniping opportunity if the new price is mispriced.
+Worth measuring before adding.
 
 ## Known limitations / open questions
 

@@ -218,6 +218,18 @@ class Strategy:
         # resting[side] -> {"order_id", "price", "qty"} or None
         self.resting: dict[str, Optional[dict]] = {"bid": None, "ask": None}
 
+        # Per-order_id timestamp of the last successful modify. Log analysis
+        # showed 87.9% of modify_acks fire <200ms after the previous modify
+        # on the same order -- faster than the market reacts, pure REST waste
+        # that starves the rate-limit budget. With min_modify_interval=0.25s
+        # we cut modify traffic ~6x without measurably worsening fill
+        # quality. SDK token-bucket is the global cap; this is the per-order
+        # debounce.  When tokens_low_threshold tokens or fewer remain, skip
+        # the modify entirely so an in-flight IOC snipe can fire.
+        self._last_modify_t: dict[int, float] = {}
+        self.min_modify_interval_sec: float = 0.25
+        self.tokens_low_threshold: float = 3.0
+
         # ---------- knobs ----------
         # Derived from fees + adverse-selection buffer, NOT from a specific
         # session's spread. Per-fill economics:
@@ -332,7 +344,7 @@ class Strategy:
         # If market_mid is unavailable (book is empty pre-warmup), we
         # skip quoting -- no anchor, no safety. Warmup gives the market
         # 2s to form before we participate.
-        self.min_reveals_to_quote = 0
+        self.min_reveals_to_quote = 1
         self.min_reveals_to_snipe = 1
         self.pre_reveal_quote_qty = 1
         # pre_reveal_min_edge=4.0 (was 10.0): the old value parked us at
@@ -409,6 +421,18 @@ class Strategy:
         # direction (selling at "high" prices that are actually below
         # truth). Skip snipes entirely when disagreement exceeds this.
         self.snipe_max_disagreement = 10.0
+        # Asymmetric disagreement override. When the symmetric gate above
+        # would block, allow snipes in the direction of OUR conviction:
+        #  - fair < market_mid (we think truth is lower than consensus):
+        #    SELL snipes go through (sell into overpaying bids); BUY snipes
+        #    stay blocked (don't pay a high ask we think is wrong).
+        #  - fair > market_mid: symmetric, BUY snipes through, SELL blocked.
+        # Grounded in combined_log_20260518_222323: 210 fat bids (821 lots)
+        # were posted at avg +7.9 ticks above settle while the symmetric
+        # gate blocked us; net +$239 round could have been +$1000+. The
+        # position cap + inventory dampener still bound exposure if our
+        # conviction turns out to be a wrong-prior tail round.
+        self.snipe_disagreement_directional = True
         # Variance-scaled quote SIZE (third layer of variance scaling).
         # mid_round_quote_qty=1 (was 2): at K=1-2 sigma is ~8-9 and even
         # though we now compete for top-of-book here, per-fill exposure
@@ -432,6 +456,29 @@ class Strategy:
         # loss-prevention layer.
         self.quote_qty_normal = 5
         self.mid_round_quote_qty_normal = 2
+        # Asymmetric inventory dampener. When |position| exceeds
+        # inv_dampen_threshold (fraction of current max_pos), shrink the
+        # quote on the side that would ADD to the existing position.
+        # Round-2 (-950) and round-23 (-470) losses in the sim were both
+        # caused by the strategy fillling at ~5 lots/quote on the SAME side
+        # (sell-side) for 4-5 reveals while a wrong-confident posterior
+        # held. Skew (linear in position) pulls the price but doesn't shrink
+        # the size; this knob does. inv_dampen_factor=0 = hard-suppress
+        # (quote None on adverse side); >0 = scale qty down.
+        self.inv_dampen_threshold_frac = 0.40
+        self.inv_dampen_factor = 0.0  # adverse side qty -> 1 (floor) when |pos| past threshold
+        # Hard kill: when |pos| exceeds inv_hard_kill_frac of max_pos, drop
+        # the adverse-side quote entirely (return None). Even a 1-lot adverse
+        # quote bled in tail rounds: round-2 of seed-1 showed pos going
+        # -17 -> -35 -> -52 across 3 reveals from many 1-lot fills accumulating.
+        # 0.55 means at sigma=5, max_pos=60, kill adverse side once |pos|>33.
+        self.inv_hard_kill_frac = 0.55
+        # Inventory-aware snipe edge: when a snipe would ADD to existing
+        # position, require more edge than usual. value_sniper-style
+        # counterparties (passive maker, qty_taker=0) feed us bad takes
+        # when we're already exposed. Adverse adds need
+        # snipe_min_edge_adverse extra ticks of margin to survive.
+        self.snipe_adverse_extra_edge = 1.5
         # Post-final-reveal behavior: when n_remaining == 0, fair is no longer
         # theoretical -- it's the exact settlement (sigma == 0). At that point:
         #   - quoting passive spread on a known value gives away free edge to
@@ -672,8 +719,10 @@ class Strategy:
             ask_px = bid_px + self.tick
 
         # Quote size shrinks in the pre-reveal regime where prior-only sigma
-        # is large -- smaller bet per fill until we have info.
-        qty = self._current_quote_qty()
+        # is large -- smaller bet per fill until we have info. Side-aware:
+        # the inventory dampener may shrink the qty on the adding side.
+        bid_qty = self._current_quote_qty("bid")
+        ask_qty = self._current_quote_qty("ask")
         # Sigma-scaled position cap: at high sigma, cap inventory below the
         # position_limit. Suppresses the bid/ask that would push us over.
         # `relaxed` reuses the same market-mid-agreement test as the qty
@@ -681,9 +730,17 @@ class Strategy:
         # post/modify size aligns with the headroom check.
         relaxed = (market_mid is not None and not biased)
         max_pos = self._max_position_for_sigma(sigma, relaxed=relaxed)
-        if bid_px is not None and self.position + qty > max_pos:
+        if bid_px is not None and self.position + bid_qty > max_pos:
             bid_px = None
-        if ask_px is not None and self.position - qty < -max_pos:
+        if ask_px is not None and self.position - ask_qty < -max_pos:
+            ask_px = None
+
+        # Hard-kill the adverse-side quote when |position| is large -- even
+        # 1-lot adverse quotes accumulate when there's heavy passive flow.
+        kill_thresh = int(max_pos * self.inv_hard_kill_frac)
+        if self.position > kill_thresh and bid_px is not None:
+            bid_px = None
+        if self.position < -kill_thresh and ask_px is not None:
             ask_px = None
 
         return bid_px, ask_px, fair, sigma
@@ -753,7 +810,26 @@ class Strategy:
         match (bid_px, ask_px). Caller must hold self.lock. _reprice is
         idempotent (no-op when price unchanged) so this is safe to call on
         every quote event without queue churn from unnecessary modifies.
+
+        Order matters to avoid self-cross when both quotes move in the same
+        direction. After a reveal, fair can jump; if we reprice bid first
+        and new_bid >= our old resting ask, the new buy crosses the old
+        sell -> self-trade (server rejects via SMP, sim eats fees). Fix:
+        when new_bid >= current_ask, cancel ask first; when new_ask <=
+        current_bid, cancel bid first.
         """
+        cur_ask = self.resting["ask"]["price"] if self.resting["ask"] else None
+        cur_bid = self.resting["bid"]["price"] if self.resting["bid"] else None
+        bid_would_cross = (bid_px is not None and cur_ask is not None
+                           and bid_px >= cur_ask)
+        ask_would_cross = (ask_px is not None and cur_bid is not None
+                           and ask_px <= cur_bid)
+        if bid_would_cross:
+            self._safe_cancel("ask")
+            cur_ask = None
+        if ask_would_cross:
+            self._safe_cancel("bid")
+            cur_bid = None
         if bid_px is None:
             self._safe_cancel("bid")
         else:
@@ -781,10 +857,11 @@ class Strategy:
             pass
         self.resting[side] = None
 
-    def _current_quote_qty(self) -> int:
-        """Active quote size, scaled by posterior uncertainty AND market-mid
-        agreement. _post and _reprice both use this so the order on the book
-        reflects the regime at the time of the post/modify call.
+    def _current_quote_qty(self, side: Optional[str] = None) -> int:
+        """Active quote size, scaled by posterior uncertainty, market-mid
+        agreement, AND (when `side` is given) inventory pressure. _post and
+        _reprice both use this so the order on the book reflects the regime
+        at the time of the post/modify call.
 
         Tiers (sigma):
           - K=0 (pre-reveal, prior-only, sigma ~25):       pre_reveal_quote_qty
@@ -796,9 +873,10 @@ class Strategy:
         upsized values; otherwise fall back to the conservative values --
         treats "no signal" the same as "biased" (no confidence to upsize).
 
-        Sigma drops monotonically as reveals accumulate, so qty only grows
-        within a round -- each upward step costs one modify (queue priority),
-        but happens at most twice (1->2->5) so the priority cost is bounded.
+        Inventory dampener (`side` provided): when |position| exceeds the
+        threshold fraction of the current max_pos, the side that would ADD
+        to the position is shrunk by `inv_dampen_factor`. Side="bid" adds
+        positive qty (long-building), side="ask" adds negative qty.
         """
         if len(self.posterior.reveals) == 0:
             return self.pre_reveal_quote_qty
@@ -808,14 +886,23 @@ class Strategy:
                    abs(fair - market_mid) <
                    self.market_anchor_disagreement_min)
         if sigma > self.full_qty_sigma_max:
-            return (self.mid_round_quote_qty_normal
+            base = (self.mid_round_quote_qty_normal
                     if relaxed else self.mid_round_quote_qty)
-        return self.quote_qty_normal if relaxed else self.quote_qty
+        else:
+            base = self.quote_qty_normal if relaxed else self.quote_qty
+        if side is not None:
+            max_pos = self._max_position_for_sigma(sigma, relaxed=relaxed)
+            threshold = int(max_pos * self.inv_dampen_threshold_frac)
+            adding = (side == "bid" and self.position > threshold) or \
+                     (side == "ask" and self.position < -threshold)
+            if adding:
+                base = max(1, int(round(base * self.inv_dampen_factor)))
+        return base
 
     def _post(self, side: str, price: int) -> None:
         method = self.c.buy if side == "bid" else self.c.sell
         sgn_side = "buy" if side == "bid" else "sell"
-        qty = self._current_quote_qty()
+        qty = self._current_quote_qty(side)
         try:
             r = method(self.symbol, price=price, qty=qty)
         except Exception as e:
@@ -838,12 +925,40 @@ class Strategy:
         if rest is None:
             self._post(side, want_px)
             return
-        qty = self._current_quote_qty()
-        if rest["price"] == want_px and rest["qty"] == qty:
-            return  # leave it alone -- keep queue priority
+        qty = self._current_quote_qty(side)
+        # FIFO-priority preservation: at the same price, only allow modifies
+        # that keep queue priority (pure qty-down, rest > target). Refills
+        # (rest < target) and exact matches (rest == target) get skipped --
+        # log analysis showed 700-800/session same-price modifies, each one
+        # forfeiting our spot in the queue to "top up" by 1 lot after a
+        # partial fill. Letting the residual fill at preserved priority is
+        # strictly better; we only post a fresh quote once it's fully filled.
+        if rest["price"] == want_px and rest["qty"] <= qty:
+            return
+
+        # Per-order debounce: skip modifies that fire too soon after the
+        # previous one. Most "fast" modifies were chasing market_mid jitter,
+        # not real fair shifts. The fair-shift path (reveal) cancels and
+        # reposts via _post, which doesn't go through this debounce.
+        order_id = rest["order_id"]
+        now = time.time()
+        last = self._last_modify_t.get(order_id, 0.0)
+        if now - last < self.min_modify_interval_sec:
+            return
+
+        # Rate-limit budget guard: when the token bucket is low, skip the
+        # modify so a snipe IOC can grab the next token. Snipes are 98.7%
+        # profitable in the analyzed logs; maker requotes are not.
+        try:
+            tokens = self.c.tokens_available()
+        except AttributeError:
+            tokens = self.tokens_low_threshold + 1.0  # SDK without bucket
+        if tokens < self.tokens_low_threshold:
+            return
+
         sgn_side = "buy" if side == "bid" else "sell"
         try:
-            res = self.c.modify(rest["order_id"], price=want_px, qty=qty)
+            res = self.c.modify(order_id, price=want_px, qty=qty)
         except Exception:
             self._safe_cancel(side)
             self._post(side, want_px)
@@ -851,13 +966,20 @@ class Strategy:
         o = res["order"]
         self._record_fill_from_trades(sgn_side, res.get("trades", []))
         if o["status"] in ("open", "partial"):
+            new_id = o["order_id"]
             self.resting[side] = {
-                "order_id": o["order_id"],
+                "order_id": new_id,
                 "price": o["price"],
                 "qty": o["remaining"],
             }
+            self._last_modify_t[new_id] = now
+            # Old id (if changed) is dead; drop its entry so the dict
+            # doesn't grow unbounded over a session.
+            if new_id != order_id:
+                self._last_modify_t.pop(order_id, None)
         else:
             self.resting[side] = None
+            self._last_modify_t.pop(order_id, None)
 
     # -------- sniping --------
 
@@ -888,19 +1010,32 @@ class Strategy:
         except Exception:
             return False
 
-        # Snipe disagreement gate: if our fair and the market_mid are far apart
-        # (tail-prior regime), our edge calc is based on a likely-biased fair.
-        # Sniping in that regime can fire snipes in the wrong direction --
-        # e.g. our biased-low fair would say all the market's offers are
-        # mispriced cheap, and we'd buy a stack of contracts at market prices
-        # that are actually close to truth. Skip sniping entirely until the
-        # posterior catches up. Exempt the post-final-reveal sweep: fair ==
-        # settle exactly there, so disagreement IS profit.
+        # Snipe disagreement gate. When fair and market_mid disagree
+        # significantly the risk is asymmetric: snipes in the direction
+        # AGAINST our conviction are the dangerous ones (we'd be buying
+        # at a high market price our biased-low fair calls cheap). Snipes
+        # WITH our conviction (selling to a high bid when our fair is
+        # below mid) are the user-requested "buy high sell low" capture.
+        # Directional mode keeps the safe direction open. Post-final
+        # sweep is exempt regardless (fair == settle).
         market_mid = self._market_mid_from_book()
-        if self._n_remaining() > 0:
-            if (market_mid is not None and
-                    abs(fair - market_mid) > self.snipe_max_disagreement):
-                return False
+        block_buy = False
+        block_sell = False
+        if self._n_remaining() > 0 and market_mid is not None:
+            diff = fair - market_mid
+            if abs(diff) > self.snipe_max_disagreement:
+                if self.snipe_disagreement_directional:
+                    # Block the snipe direction that BETS WITH market_mid
+                    # over our fair. If fair < mid we trust the lower fair,
+                    # so buying at mid-anchored asks is the wrong-side bet.
+                    if diff < 0:
+                        block_buy = True
+                    else:
+                        block_sell = True
+                else:
+                    return False
+        if block_buy and block_sell:
+            return False
 
         # Our own resting prices -- skip these in the snipe loop.
         our_ask_px = self.resting["ask"]["price"] if self.resting["ask"] else None
@@ -911,9 +1046,24 @@ class Strategy:
             # is a risk-free profitable trade. No min_edge or sigma buffer --
             # take everything visible. This is the "take a position that is
             # profitable immediately" sweep.
-            edge_required = self.taker_fee
+            edge_required_buy = self.taker_fee
+            edge_required_sell = self.taker_fee
         else:
-            edge_required = self.taker_fee + max(self.snipe_min_edge, self.snipe_buffer_sigma * sigma)
+            base_edge = self.taker_fee + max(
+                self.snipe_min_edge, self.snipe_buffer_sigma * sigma)
+            # Inventory-aware snipe edge: when the take would ADD to the
+            # existing position (buy while long, sell while short), require
+            # the adverse extra edge. Defends against value_sniper traps
+            # that feed us bad fills when we're already exposed.
+            max_pos_for_threshold = self._max_position_for_sigma(
+                sigma, relaxed=(market_mid is not None and
+                                abs(fair - market_mid) <
+                                self.market_anchor_disagreement_min))
+            threshold = int(max_pos_for_threshold * self.inv_dampen_threshold_frac)
+            edge_required_buy = base_edge + (
+                self.snipe_adverse_extra_edge if self.position > threshold else 0.0)
+            edge_required_sell = base_edge + (
+                self.snipe_adverse_extra_edge if self.position < -threshold else 0.0)
         # Per-snipe size cap. We have a +/-100 trader position limit; bots
         # don't. Take many small bites instead of one big bite -- leaves
         # headroom for the NEXT snipe at a different level (log analysis
@@ -935,57 +1085,59 @@ class Strategy:
         max_pos = self._max_position_for_sigma(sigma, relaxed=relaxed)
         took_any = False
 
-        for level in book.get("asks") or []:
-            if our_ask_px is not None and level["price"] == our_ask_px:
-                continue  # don't snipe our own ask
-            mispricing = fair - level["price"]
-            if mispricing <= edge_required:
-                break
-            headroom = max_pos - self.position
-            if headroom <= 0:
-                break
-            qty = min(level["qty"], headroom, snipe_cap)
-            if qty <= 0:
-                break
-            try:
-                res = self.c.buy_ioc(self.symbol, price=level["price"], qty=qty)
-            except Exception:
-                break
-            filled = self._record_fill_from_trades("buy", res.get("trades", []))
-            if filled:
-                took_any = True
-                # Mid-round snipes count against max_snipes_per_round; the
-                # post-final-reveal sweep is exempt (settle is known).
-                if self._n_remaining() > 0:
-                    self._snipe_count_this_round += 1
-                print(f"  SNIPE buy  {filled} @ {level['price']}  fair={fair:.1f}  edge={mispricing:.1f}")
-            else:
-                break
+        if not block_buy:
+            for level in book.get("asks") or []:
+                if our_ask_px is not None and level["price"] == our_ask_px:
+                    continue  # don't snipe our own ask
+                mispricing = fair - level["price"]
+                if mispricing <= edge_required_buy:
+                    break
+                headroom = max_pos - self.position
+                if headroom <= 0:
+                    break
+                qty = min(level["qty"], headroom, snipe_cap)
+                if qty <= 0:
+                    break
+                try:
+                    res = self.c.buy_ioc(self.symbol, price=level["price"], qty=qty)
+                except Exception:
+                    break
+                filled = self._record_fill_from_trades("buy", res.get("trades", []))
+                if filled:
+                    took_any = True
+                    # Mid-round snipes count against max_snipes_per_round; the
+                    # post-final-reveal sweep is exempt (settle is known).
+                    if self._n_remaining() > 0:
+                        self._snipe_count_this_round += 1
+                    print(f"  SNIPE buy  {filled} @ {level['price']}  fair={fair:.1f}  edge={mispricing:.1f}")
+                else:
+                    break
 
-        for level in book.get("bids") or []:
-            if our_bid_px is not None and level["price"] == our_bid_px:
-                continue  # don't snipe our own bid
-            mispricing = level["price"] - fair
-            if mispricing <= edge_required:
-                break
-            headroom = max_pos + self.position
-            if headroom <= 0:
-                break
-            qty = min(level["qty"], headroom, snipe_cap)
-            if qty <= 0:
-                break
-            try:
-                res = self.c.sell_ioc(self.symbol, price=level["price"], qty=qty)
-            except Exception:
-                break
-            filled = self._record_fill_from_trades("sell", res.get("trades", []))
-            if filled:
-                took_any = True
-                if self._n_remaining() > 0:
-                    self._snipe_count_this_round += 1
-                print(f"  SNIPE sell {filled} @ {level['price']}  fair={fair:.1f}  edge={mispricing:.1f}")
-            else:
-                break
+        if not block_sell:
+            for level in book.get("bids") or []:
+                if our_bid_px is not None and level["price"] == our_bid_px:
+                    continue  # don't snipe our own bid
+                mispricing = level["price"] - fair
+                if mispricing <= edge_required_sell:
+                    break
+                headroom = max_pos + self.position
+                if headroom <= 0:
+                    break
+                qty = min(level["qty"], headroom, snipe_cap)
+                if qty <= 0:
+                    break
+                try:
+                    res = self.c.sell_ioc(self.symbol, price=level["price"], qty=qty)
+                except Exception:
+                    break
+                filled = self._record_fill_from_trades("sell", res.get("trades", []))
+                if filled:
+                    took_any = True
+                    if self._n_remaining() > 0:
+                        self._snipe_count_this_round += 1
+                    print(f"  SNIPE sell {filled} @ {level['price']}  fair={fair:.1f}  edge={mispricing:.1f}")
+                else:
+                    break
 
         return took_any
 
@@ -1031,35 +1183,55 @@ class Strategy:
             if fair == 0.0 and sigma == 0.0:
                 return False
 
-            # Disagreement gate -- but here we REQUIRE a fresh book cache,
+            # Disagreement gate -- here we REQUIRE a fresh book cache,
             # because direct snipe bypasses the book.fetch in maybe_snipe.
             # If cache is stale we have no disagreement signal, so defer
-            # to the throttled path (which will refetch).
+            # to the throttled path (which will refetch). Directional mode
+            # (matches maybe_snipe) lets the with-conviction side through
+            # so we can capture fat bids when market_mid is biased high.
             market_mid = self._market_mid_from_book()
             if self._n_remaining() > 0:
                 if market_mid is None:
                     return False
-                if abs(fair - market_mid) > self.snipe_max_disagreement:
-                    return False
-
-            if self._n_remaining() == 0:
-                edge_required = self.taker_fee
-            else:
-                edge_required = (self.taker_fee +
-                                 max(self.snipe_min_edge,
-                                     self.snipe_buffer_sigma * sigma))
+                diff = fair - market_mid
+                if abs(diff) > self.snipe_max_disagreement:
+                    if not self.snipe_disagreement_directional:
+                        return False
+                    # side=="buy" means a quote_add bid -- we'd SELL to it.
+                    # side=="sell" means an ask -- we'd BUY from it.
+                    # diff<0 (fair below mid) blocks our BUY snipes (against
+                    # conviction); diff>0 blocks SELL snipes.
+                    if diff < 0 and side == "sell":
+                        return False
+                    if diff > 0 and side == "buy":
+                        return False
 
             snipe_cap = self.snipe_max_qty_per_level
             relaxed = (market_mid is not None and
                        abs(fair - market_mid) <
                        self.market_anchor_disagreement_min)
             max_pos = self._max_position_for_sigma(sigma, relaxed=relaxed)
+            threshold = int(max_pos * self.inv_dampen_threshold_frac)
+
+            if self._n_remaining() == 0:
+                edge_required_buy = self.taker_fee
+                edge_required_sell = self.taker_fee
+            else:
+                base_edge = (self.taker_fee +
+                             max(self.snipe_min_edge,
+                                 self.snipe_buffer_sigma * sigma))
+                edge_required_buy = base_edge + (
+                    self.snipe_adverse_extra_edge
+                    if self.position > threshold else 0.0)
+                edge_required_sell = base_edge + (
+                    self.snipe_adverse_extra_edge
+                    if self.position < -threshold else 0.0)
 
             if side == "buy":
                 # They posted a BID at `price`. If price > fair + edge they
                 # are buying high -- sell to them via IOC at their price.
                 mispricing = price - fair
-                if mispricing <= edge_required:
+                if mispricing <= edge_required_sell:
                     return False
                 headroom = max_pos + self.position
                 if headroom <= 0:
@@ -1083,7 +1255,7 @@ class Strategy:
                 # They posted an ASK at `price`. If price < fair - edge they
                 # are selling low -- buy from them via IOC at their price.
                 mispricing = fair - price
-                if mispricing <= edge_required:
+                if mispricing <= edge_required_buy:
                     return False
                 headroom = max_pos - self.position
                 if headroom <= 0:
@@ -1108,11 +1280,10 @@ class Strategy:
 
     def step(self, *, reconcile: bool = False) -> None:
         with self.lock:
-            try:
-                phase = self.c.game_state().get("phase")
-            except Exception:
-                return
-            self.phase = phase  # keep local phase in sync (read by on_quote_event)
+            # self.phase is kept in sync by on_phase_change (WS-driven). Hitting
+            # game_state() REST here adds ~30-50ms per step on the hot path
+            # (called on every fill, reveal, status). Trust the cached value.
+            phase = self.phase
             if phase != "running":
                 if phase == "settled":
                     self.resting = {"bid": None, "ask": None}
@@ -1195,6 +1366,16 @@ class Strategy:
             time.sleep(0.05)
 
     def on_fill_event(self, msg: dict) -> None:
+        # Two paths:
+        #  - Matched: WS fill belongs to one of our resting orders. Update
+        #    self.position locally from the fill msg and skip the positions()
+        #    REST. Saves ~30-50ms in the post-fill reprice path; matters more
+        #    when fills cluster (a 10-lot quote getting partial-walked).
+        #  - Unmatched: WS fill is for an IOC (snipe) we sent — we already
+        #    updated self.position synchronously via _record_fill_from_trades
+        #    on the IOC response — OR a fill arrived before self.resting
+        #    caught up after a modify. Keep reconcile=True as a safety net.
+        matched = False
         with self.lock:
             side = msg["side"]
             qty = msg["qty"]
@@ -1203,10 +1384,15 @@ class Strategy:
                 rest = self.resting[key]
                 if rest is not None and rest["order_id"] == order_id and side == expected_side:
                     rest["qty"] -= qty
+                    if side == "buy":
+                        self.position += qty
+                    else:
+                        self.position -= qty
                     if rest["qty"] <= 0:
                         self.resting[key] = None
+                    matched = True
                     break
-        self.step(reconcile=True)
+        self.step(reconcile=not matched)
 
     def on_quote_event(self, msg: dict) -> None:
         """React to a new (or cancelled) quote on the book.
