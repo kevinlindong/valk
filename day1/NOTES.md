@@ -784,3 +784,119 @@ Worth measuring before adding.
   `simulation_mc.py` cannot validate changes to `strategy.py` directly. To
   test new live-strategy logic, either port it to `ImprovedBot` or run a
   short live session and inspect the log.
+
+## v7 cross-symbol VWAP contamination + maker-cross (2026-05-19)
+
+Audit of 6 live sessions (`logs/strat7_sean_bot{,2..6}.jsonl`, 7 rounds total):
+
+| session | settle | reveals | PnL | buys | sells | maker | taker |
+|---|---:|---|---:|---:|---:|---:|---:|
+| sean_bot   | 22 | [5,5,5,2,2,3] | **+234** | 6 | 40 | 7 | 39 |
+| sean_bot2  | 53 | [7,9,10,9,10,8] | **−427.5** | 0 | 35 | 0 | 35 |
+| sean_bot3  | 11 | [2,1,3,1,3,1] | **+161.5** | 65 | 76 | 34 | 107 |
+| sean_bot4 r1 | 22 | [3,5,5,3,4,2] | **+167.5** | 24 | 69 | 23 | 70 |
+| sean_bot4 r2 | 31 | [6,6,5,5,5,4] | **+66.5** | 0 | 45 | 1 | 44 |
+| sean_bot5  | 33 | [6,6,5,6,5,5] | **+40** | 0 | 44 | 3 | 41 |
+| sean_bot6  | 34 | [5,5,6,6,6,6] | **−92.5** | 2 | 47 | 6 | 43 |
+| **total** | | | **+149.5** | | | | |
+
+Session 2 alone took −427.5 (settle=53, a right-tail round). Without it the
+strategy is +577 across 6 rounds.
+
+**Root cause — cross-symbol VWAP contamination.** `Strategy.on_trade`
+ingested *every* public `trade` event into the v6/v7 VWAP buffer regardless
+of symbol. Symbol B settles in the 1-8 range vs symbol A's ~30, so mixing
+the two systematically biases VWAP downward.
+
+Trace from sean_bot2 at t+2.61s (right before our first K=0 fill):
+- Symbol-A-only trades: 40×2, 39×1, 40×1 → true VWAP = **39.75**
+- All-symbol buffer fed to strategy: A trades + B@10, B@4 → VWAP = **22.6**
+- Side guard's `ask_floor = ceil(VWAP)+1` becomes 24 instead of 41
+- Our maker SELL post @ 38 (= fair_eff + edge, with fair pulled toward 22.6)
+  crossed the existing market bid @ 40 → filled as **TAKER @ 40** three
+  times in 0.1s. Reveal=7 followed at K=1; the still-corrupt VWAP let
+  the snipe path IOC into bids at 38/37/37 (10 lots vs SEAN/VALKL/VALKD).
+  All 35 fills in session 2 were SELLS, all TAKER, at avg 37-43 vs settle 53.
+
+Sessions 5/6 show the same short-bias pattern, masked because settles
+happened to be close to the biased fair.
+
+**Fixes applied to `strategy7.py`:**
+
+1. **Symbol filter in `on_trade`**: early-return if `msg["symbol"] != self.symbol`.
+   Defensive — survives any runner-side dispatch mistake. One-line change at
+   the top of the method.
+
+2. **`min_trade_vol_pre_reveal: 8 → 3`** and **`vwap_clamp_min_volume: 8 → 3`**.
+   With the clean (A-only) tape, the K=0 v6 blend and the K∈{1,2,3} VWAP
+   clamp / side guard need only a handful of A-lots to engage. The old
+   floor of 8 was conservative against a noisy mixed buffer — no longer
+   needed and was preventing the defenses from firing in the first 1-2s
+   of a new round.
+
+3. **No-cross guard in `desired_quotes`** (final block before `return`):
+   if the cached inside book shows `ask_px <= best_bid` or `bid_px >= best_ask`,
+   drop the post. Pure invariant — a maker order should never be marketable.
+   Backstops the VWAP-side-guard soft defense for the cases where VWAP
+   itself lags a fast-moving consensus.
+
+Smoke test (`unittest.mock` client): B trades ignored, A-only VWAP correct,
+side guard returns valid VWAP at K=1 with only 4 lots, no-cross guard drops
+both `ask_px <= best_bid` and `bid_px >= best_ask`. To validate live:
+run `python day1/run_combined7.py` and confirm K=0 fills are no longer
+TAKER fills crossing the inside book.
+
+Open: the 6-session evidence suggests our prior `E[settle]≈27.3` understates
+the right tail (observed mean 29.4, but P(settle≥50)≈14% empirically vs
+near-zero under the LogN priors). Heavier-tailed prior is a candidate
+next change — but contaminated VWAP was the dominant bug; re-measure after
+the symbol filter before tuning the prior.
+
+## Strategy v8 — SEAN-window passive + reveal-math snipe guard (2026-05-19)
+
+**Motivation:** strat7.5 ran the `sean_bot{1,2,3}` sessions. SEAN consistently
+wins by posting `qty=5` maker quotes ~1s before each scheduled reveal and
+never aggressing. v7 still leaked $384 on one IOC BUY at 102 against true
+fair 86 — a reveal-math projection (sample-mean over revealed values)
+disagreed with the posterior at the moment of that trade and would have
+blocked it.
+
+Position limit on symbol A is **50** (was 100). Symbol B exists with
+multiplier 5x and settles to next draw, but v8 trades **A only** for now.
+
+**Files:** `day1/strategy8.py` (subclass of Strategy7, ~460 lines),
+`day1/run_combined8.py` (runner). All round params (`duration`,
+`reveal_interval`, `position_limit`, `tick_size`, `multiplier`) come from
+`game_state` — nothing hardcoded.
+
+**v8 knob table (deltas vs v7):**
+
+| knob                          | v7    | v8    | rationale                                                |
+|-------------------------------|-------|-------|----------------------------------------------------------|
+| `snipe_min_edge`              | 1.0   | 2.0   | the 102 vs 86 leak crossed the 1.0 gate; double it       |
+| `snipe_max_disagreement`      | 6.0   | 3.0   | tighten so a noisy market-mid can veto bad snipes        |
+| `max_snipes_per_round`        | 80    | 40    | post-VWAP-fix v7 already snipes less; cap further        |
+| `snipe_position_buffer`       | 4     | 8     | leave more headroom against the 50 cap                   |
+| `sean_window_sec`             | —     | 1.5   | post upsized maker quotes 1.5s before each reveal        |
+| `sean_pre_reveal_cancel_sec`  | —     | 0.3   | cancel ALL orders 0.3s before the reveal (avoid late MM) |
+| `sean_window_qty`             | —     | 5     | matches SEAN's observed size                             |
+| `reveal_math_min_k`           | —     | 2     | need ≥2 reveals before projection is informative         |
+| `reveal_math_guard_ticks`     | —     | 4.0   | block snipe when posterior fair drifts >4 ticks from RM  |
+
+**Background scheduler:** `_sean_scheduler_loop` (daemon thread) ticks every
+0.1s, keyed off `_last_reveal_t + self.reveal_interval`. At
+`reveal_t - 0.3s` it cancels all live quotes; at `reveal_t - 1.5s` it
+triggers `step()` which re-posts at `sean_window_qty` *if* the consensus
+gate agrees (`|fair - market_signal| < market_anchor_disagreement_min`).
+
+**Reveal-math guard:** `_reveal_math_fair()` projects
+`running_sum + (N-K) * mean(reveals)`. `_reveal_math_blocks_buy(fair_eff)`
+returns True when `fair_eff > rm_fair + guard_ticks` (we'd be paying more
+than the sample-mean projection); symmetric for sell. Applied inside
+`maybe_snipe` and `_try_direct_snipe` to veto direction-of-bad-edge IOCs.
+
+**Smoke test (`.venv/bin/python`, mocked client):** all v8 knobs visible,
+`_reveal_math_fair`/`_in_sean_window`/`_next_reveal_at` compute correctly,
+scheduler thread starts/stops cleanly, guard blocks the 90→492 sell case
+and the 600→492 buy case (the two leak directions). Run live with:
+`python day1/run_combined8.py` (writes `combined_log_v8_<TS>.jsonl`).
