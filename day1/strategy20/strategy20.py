@@ -635,51 +635,6 @@ class Config(ConfigV19):
     bounds_arb_qty_budget_d: int = 75    # full ±L on D
 
     # =================================================================
-    # v20.15 — Shadow-dime extreme MM (vs BRYA-style wide quoters)
-    # =================================================================
-    # Investigation of recent logs identified participant `BRYA`
-    # posting asks/bids far from fair (e.g. C ask at 997 qty 24 vs
-    # fair ~50, A ask at 2000 vs fair ~227) and routinely getting
-    # filled by irrational counterparties. Our job: undercut BRYA's
-    # extreme by 1 tick so the irrational lift flow comes to US
-    # instead. Symmetric for extreme bids.
-    #
-    # Defensive complement: existing `max_ioc_distance_ticks_{a,b,c,d}`
-    # already prevents us from lifting extreme asks via IOC paths.
-    # This new logic only POSTS at extreme prices on our own quote
-    # side — it never CROSSES into an extreme. We always sit 1 tick
-    # inside the extreme, capturing the maker rebate + any +EV vs
-    # fair, and we never become the irrational counterparty.
-    shadow_dime_enabled: bool = True
-    # An ask qualifies as "extreme" if its price ≥ fair + threshold
-    # ticks (per symbol). A bid qualifies if price ≤ fair − threshold.
-    # Override with hard upper / lower bounds from the identity table
-    # whenever they're tighter (see _shadow_extreme_*_threshold).
-    shadow_dime_distance_ticks_a: float = 50.0
-    shadow_dime_distance_ticks_b: float = 30.0
-    shadow_dime_distance_ticks_c: float = 30.0
-    shadow_dime_distance_ticks_d: float = 30.0
-    # Per-symbol max qty we'll post at the dime price. Capped low
-    # because extreme fills carry asymmetric outcomes (huge profit
-    # if hit, free cancel if not).
-    shadow_dime_max_qty_a: int = 10
-    shadow_dime_max_qty_b: int = 5      # B intra-tick risk
-    shadow_dime_max_qty_c: int = 10
-    shadow_dime_max_qty_d: int = 10
-    # Minimum offerer qty at the extreme level to bother shadowing.
-    # Avoids chasing 1-lot decoys.
-    shadow_dime_min_offerer_qty: int = 3
-    # Edge above the identity-table bound (in ticks). When the bound
-    # is exact (e.g. C upper=100), an ask at exactly upper+1 is the
-    # first extreme; we want to be 1 tick inside, so dime price =
-    # extreme_px - 1. The threshold for "is this ask extreme" then
-    # becomes `bound + edge`.
-    shadow_dime_bound_edge_ticks: float = 1.0
-    # Throttle on shadow refresh per symbol (book events can fire
-    # 50+/sec).
-    shadow_dime_throttle_sec: float = 0.15
-
-    # =================================================================
     # COID prefix
     # =================================================================
     client_order_id_prefix: str = "v20"
@@ -830,22 +785,6 @@ class Strategy(StrategyV19):
             s: IdentityBounds(sym=s) for s in self.SYMS
         }
         self._identity_gen: int = 0
-
-        # v20.15: shadow-dime resting. SEPARATE from `s.resting` so
-        # the standard orphan-drain / primary-replace logic in
-        # `_apply_side` leaves these alone. Each entry:
-        #   {order_id, price, qty, added_t}.
-        # Keys: sym → "bid"/"ask" → oid → entry.
-        self._shadow_resting: Dict[str, Dict[str, Dict]] = {
-            s: {"bid": {}, "ask": {}} for s in self.SYMS
-        }
-        # Per-symbol throttle on shadow refresh — book events can fire
-        # 50+/sec and we don't need to recompute that often.
-        self._last_shadow_dime_t: Dict[str, float] = {
-            s: 0.0 for s in self.SYMS
-        }
-        self._shadow_dime_post_count: int = 0
-        self._shadow_dime_fill_count: int = 0
 
         # v20.3: per-symbol scalp-out throttle (hit-and-retreat).
         # Key: symbol → last scalp-out timestamp.
@@ -2302,295 +2241,6 @@ class Strategy(StrategyV19):
             }
         return out
 
-    # ==================================================================
-    # v20.15 — Shadow-dime: undercut BRYA-style extreme asks/bids
-    #
-    # Other participants (notably BRYA in recent logs) post asks/bids
-    # FAR from fair (e.g. C ask at 997 vs fair ~50) and routinely get
-    # filled by irrational counterparty bots that walk the book past
-    # the BBO. We want to be 1 tick INSIDE those extreme prices so the
-    # irrational lift flow comes to US instead.
-    #
-    # Safety:
-    #   * We only ever POST at extreme prices, never CROSS them. Our
-    #     IOC paths already gate on `max_ioc_distance_ticks_X`, so we
-    #     cannot become the irrational counterparty ourselves.
-    #   * We shadow at MOST shadow_dime_max_qty_X lots per side per
-    #     symbol — small enough that an unexpected fill is still well
-    #     within the per-symbol position cap.
-    #   * We skip spoof-classified levels (existing extreme-linger gate)
-    #     because those quotes get PULLED rather than filled.
-    #
-    # Tracking:
-    #   * Shadow orders live in `self._shadow_resting[sym][side]` —
-    #     SEPARATE from `s.resting` so MM's orphan-drain leaves them
-    #     alone. Fills are reflected in `s.position` via the standard
-    #     on_fill_event path; we also clean the shadow dict on fill
-    #     (see `on_fill_event` override below).
-    # ==================================================================
-    def _shadow_dime_distance_ticks_for(self, sym: str) -> float:
-        if sym == "A":
-            return self.cfg.shadow_dime_distance_ticks_a
-        if sym == "B":
-            return self.cfg.shadow_dime_distance_ticks_b
-        if sym == "C":
-            return self.cfg.shadow_dime_distance_ticks_c
-        return self.cfg.shadow_dime_distance_ticks_d
-
-    def _shadow_dime_max_qty_for(self, sym: str) -> int:
-        if sym == "A":
-            return self.cfg.shadow_dime_max_qty_a
-        if sym == "B":
-            return self.cfg.shadow_dime_max_qty_b
-        if sym == "C":
-            return self.cfg.shadow_dime_max_qty_c
-        return self.cfg.shadow_dime_max_qty_d
-
-    def _shadow_extreme_ask_threshold(self, sym: str, fair: float
-                                      ) -> Optional[float]:
-        """Return the lowest ASK price that qualifies as 'extreme' for
-        this symbol. Asks at or above this price are shadow targets."""
-        ib = self._identity_table.get(sym)
-        edge = self.cfg.shadow_dime_bound_edge_ticks
-        bound_thr = (ib.upper + edge
-                     if ib is not None and ib.upper is not None
-                     else None)
-        fair_thr = fair + self._shadow_dime_distance_ticks_for(sym)
-        if bound_thr is None:
-            return fair_thr
-        # Use the TIGHTER threshold (more permissive — catches more
-        # extremes). When ib.upper exists, it's usually tighter than
-        # fair + N (especially under truth where upper == fair).
-        return min(bound_thr, fair_thr)
-
-    def _shadow_extreme_bid_threshold(self, sym: str, fair: float
-                                      ) -> Optional[float]:
-        """Return the highest BID price that qualifies as 'extreme'
-        for this symbol. Bids at or below this price are shadow targets."""
-        ib = self._identity_table.get(sym)
-        edge = self.cfg.shadow_dime_bound_edge_ticks
-        bound_thr = (ib.lower - edge
-                     if ib is not None and ib.lower is not None
-                     else None)
-        fair_thr = fair - self._shadow_dime_distance_ticks_for(sym)
-        if bound_thr is None:
-            return fair_thr
-        return max(bound_thr, fair_thr)
-
-    def _maybe_shadow_dime(self, sym: str) -> None:
-        """Scan the book for the cheapest extreme ask and the highest
-        extreme bid, and sync our shadow_resting to sit 1 tick inside
-        each. Posts via `c.buy` / `c.sell` directly (separate from MM)."""
-        if not self.cfg.shadow_dime_enabled:
-            return
-        if not self._can_post():
-            return
-        if self._in_lockout():
-            return
-        if self._in_park_window():
-            return
-        s = self.state.get(sym)
-        if s is None or not s.book:
-            return
-        now = time.time()
-        if (now - self._last_shadow_dime_t.get(sym, 0.0)
-                < self.cfg.shadow_dime_throttle_sec):
-            return
-        self._last_shadow_dime_t[sym] = now
-
-        try:
-            fair, _ = self._fair_for(sym)
-        except Exception:
-            return
-        tick = s.tick
-        min_offerer = self.cfg.shadow_dime_min_offerer_qty
-        max_qty = self._shadow_dime_max_qty_for(sym)
-        eff_cap = self._effective_position_cap(sym)
-        pad = self.cfg.sweep_position_pad
-
-        # Build set of OUR prices on each side so we never shadow our
-        # own quote / shadow level.
-        our_ask_prices = (
-            {int(e.get("price")) for e in s.resting["ask"].values()
-             if e.get("price") is not None}
-            | {int(e.get("price")) for e
-               in self._shadow_resting[sym]["ask"].values()
-               if e.get("price") is not None})
-        our_bid_prices = (
-            {int(e.get("price")) for e in s.resting["bid"].values()
-             if e.get("price") is not None}
-            | {int(e.get("price")) for e
-               in self._shadow_resting[sym]["bid"].values()
-               if e.get("price") is not None})
-
-        # ---------- ASK shadow ----------
-        ask_thr = self._shadow_extreme_ask_threshold(sym, fair)
-        target_ask_px: Optional[int] = None
-        target_ask_qty: int = 0
-        if ask_thr is not None:
-            for lvl in (s.book.get("asks") or []):
-                px = lvl.get("price")
-                qty = int(lvl.get("qty") or 0)
-                if px is None or qty < min_offerer:
-                    continue
-                if px in our_ask_prices:
-                    continue
-                if px < ask_thr:
-                    continue  # not extreme — try deeper levels
-                if self._is_spoof_like(sym, "ask", int(px)):
-                    continue
-                # Dime: 1 tick INSIDE (i.e. cheaper for buyers).
-                candidate_px = int(px) - tick
-                # Refuse to dime BELOW our own threshold (defensive).
-                if candidate_px < ask_thr:
-                    candidate_px = int(math.ceil(ask_thr))
-                # Also refuse to undercut into a price where we'd be
-                # at or below fair on the ask side (would imply we're
-                # competing with our regular MM ask). Keep shadow
-                # strictly ABOVE fair + distance_ticks.
-                min_post = fair + self._shadow_dime_distance_ticks_for(sym)
-                if candidate_px < min_post:
-                    continue
-                # Capacity check.
-                room_sell = (s.position
-                             - (-eff_cap + pad))
-                if room_sell <= 0:
-                    break
-                target_ask_px = candidate_px
-                target_ask_qty = min(qty, max_qty, room_sell)
-                break
-        self._sync_shadow_side(sym, "ask", target_ask_px,
-                               target_ask_qty, fair)
-
-        # ---------- BID shadow ----------
-        bid_thr = self._shadow_extreme_bid_threshold(sym, fair)
-        target_bid_px: Optional[int] = None
-        target_bid_qty: int = 0
-        if bid_thr is not None:
-            for lvl in (s.book.get("bids") or []):
-                px = lvl.get("price")
-                qty = int(lvl.get("qty") or 0)
-                if px is None or qty < min_offerer:
-                    continue
-                if px in our_bid_prices:
-                    continue
-                if px > bid_thr:
-                    continue
-                if self._is_spoof_like(sym, "bid", int(px)):
-                    continue
-                candidate_px = int(px) + tick
-                if candidate_px > bid_thr:
-                    candidate_px = int(math.floor(bid_thr))
-                max_post = fair - self._shadow_dime_distance_ticks_for(sym)
-                if candidate_px > max_post:
-                    continue
-                room_buy = (eff_cap - pad) - s.position
-                if room_buy <= 0:
-                    break
-                target_bid_px = candidate_px
-                target_bid_qty = min(qty, max_qty, room_buy)
-                break
-        self._sync_shadow_side(sym, "bid", target_bid_px,
-                               target_bid_qty, fair)
-
-    def _sync_shadow_side(self, sym: str, side: str,
-                          target_px: Optional[int], target_qty: int,
-                          fair: float) -> None:
-        """Sync `_shadow_resting[sym][side]` to a single target (px, qty).
-        Cancels any existing shadow that doesn't match; posts a fresh
-        one if missing."""
-        shadow = self._shadow_resting[sym][side]
-        # Cancel everything that doesn't match the new target.
-        for oid, entry in list(shadow.items()):
-            keep = (target_px is not None
-                    and int(entry.get("price") or 0) == int(target_px))
-            if keep:
-                continue
-            if self._cancel(sym, oid):
-                shadow.pop(oid, None)
-                print(f"[v20.15 SHADOW-CXL:{sym}/{side}] "
-                      f"{entry.get('qty')}@{entry.get('price')}")
-        # Done if no target.
-        if target_px is None or target_qty <= 0:
-            return
-        # Already have a shadow at target.
-        if any(int(e.get("price") or 0) == int(target_px)
-               for e in shadow.values()):
-            return
-        # Pre-flight gates (mirror `_apply_side` minimum).
-        if not self._can_send(sym, side, target_qty):
-            return
-        if self._tokens_available() < self.cfg.mm_send_min_tokens:
-            return
-        if not self._can_send_now():
-            self._sends_deferred += 1
-            return
-        # POST.
-        self._register_send()
-        fn = self.c.buy if side == "bid" else self.c.sell
-        try:
-            res = fn(sym, int(target_px), int(target_qty),
-                     client_order_id=self._make_coid())
-            res_obj = res or {}
-            nested = res_obj.get("order") or {}
-            oid = (res_obj.get("order_id") or res_obj.get("id")
-                   or nested.get("order_id") or nested.get("id"))
-            if oid is not None:
-                shadow[oid] = {
-                    "order_id": oid,
-                    "price": int(target_px),
-                    "qty": int(target_qty),
-                    "added_t": time.time(),
-                }
-                self._shadow_dime_post_count += 1
-                self._post_count += 1
-                print(f"[v20.15 SHADOW-POST:{sym}/{side}] "
-                      f"{target_qty}@{target_px} fair={fair:.1f} "
-                      f"edge={abs(target_px - fair):.0f}t")
-        except Exception as e:
-            msg = str(e).lower()
-            if "403" in msg or "forbidden" in msg:
-                self._handle_forbidden("SHADOW-POST", sym, side,
-                                       int(target_px), e)
-            elif "limit" not in msg and "position" not in msg:
-                print(f"[v20.15 SHADOW-POST-ERR:{sym}/{side}@"
-                      f"{target_px}] {type(e).__name__}: {e}")
-
-    def _drain_shadow_on_fill(self, sym: str, side: str, oid,
-                              qty: int) -> bool:
-        """If a fill matches a shadow order, update the qty and
-        return True. Called from on_fill_event."""
-        if sym not in self._shadow_resting:
-            return False
-        side_dict = self._shadow_resting[sym].get(side)
-        if not side_dict:
-            return False
-        entry = side_dict.get(oid)
-        if entry is None:
-            return False
-        new_qty = max(0, int(entry.get("qty") or 0) - qty)
-        if new_qty == 0:
-            side_dict.pop(oid, None)
-        else:
-            entry["qty"] = new_qty
-        self._shadow_dime_fill_count += 1
-        print(f"[v20.15 SHADOW-FILL:{sym}/{side}] {qty}@"
-              f"{entry.get('price')} (remaining {new_qty})")
-        return True
-
-    def _shadow_cancel_all(self, sym: Optional[str] = None) -> int:
-        """Cancel every shadow resting order, return count."""
-        syms = (sym,) if sym is not None else self.SYMS
-        cancelled = 0
-        for s in syms:
-            for side in ("bid", "ask"):
-                shadow = self._shadow_resting[s][side]
-                for oid in list(shadow.keys()):
-                    if self._cancel(s, oid):
-                        shadow.pop(oid, None)
-                        cancelled += 1
-        return cancelled
-
     def _bounds_arb_slice_for(self, sym: str) -> int:
         """Per-symbol slice cap for bounds-arb. Larger than cross-arb
         slice because bounds-arb fills are risk-free."""
@@ -2881,23 +2531,10 @@ class Strategy(StrategyV19):
         if not self._can_post():
             return False
 
-        # v20.15: Asymmetric distance gate.
-        # The intent of `max_ioc_distance_ticks` is to refuse the
-        # LOSING side of a wide-quote bait — we never want to BUY at
-        # fair + max_dist (overpay) nor SELL at fair - max_dist
-        # (undersell).
-        # The PROFITABLE side at the same extreme — SELL at fair +
-        # max_dist (BRYA-bid at extreme high) or BUY at fair -
-        # max_dist (BRYA-ask at extreme low, with bound match) — is
-        # risk-free against the identity table and must be allowed.
-        # Pre-v20.15 the gate was `abs(price - fair) > max_dist`
-        # which blocked both, costing us BRYA's biggest mispricings.
         max_dist = self._max_ioc_dist_for(sym)
         if max_dist > 0:
             fair, _ = self._fair_for(sym)
-            if side == "buy" and (price - fair) > max_dist:
-                return False
-            if side == "sell" and (fair - price) > max_dist:
+            if abs(price - fair) > max_dist:
                 return False
 
         # Anti-spoof extreme-tick linger gate (currently only C).
@@ -3516,30 +3153,11 @@ class Strategy(StrategyV19):
             self._ingest_private_fill(msg)
         except Exception as e:
             print(f"[v20.7 TAPE-PRIV:ERR] {type(e).__name__}: {e}")
-        # v20.15: drain shadow resting BEFORE super() so super's
-        # standard `s.resting` lookup doesn't see this oid (shadows
-        # live in `_shadow_resting` only). super() still updates
-        # `s.position` correctly because it doesn't gate on resting.
-        sym = msg.get("symbol")
-        side = msg.get("side")
-        oid = msg.get("order_id")
-        qty = int(msg.get("qty") or 0)
-        if (sym in self.SYMS and side in ("buy", "sell")
-                and qty > 0 and oid is not None
-                and msg.get("liquidity") == "maker"):
-            try:
-                # Maker fill on a shadow ask = we got dimed and the
-                # irrational counterparty just lifted us. (Side here
-                # is from the FILL perspective: maker side is what we
-                # POSTED, so msg side == "sell" → our ask was hit).
-                shadow_side = "ask" if side == "sell" else "bid"
-                self._drain_shadow_on_fill(sym, shadow_side, oid, qty)
-            except Exception as e:
-                print(f"[v20.15 SHADOW-FILL-ERR] "
-                      f"{type(e).__name__}: {e}")
         super().on_fill_event(msg)
         if not self.cfg.hit_and_retreat_enabled:
             return
+        sym = msg.get("symbol")
+        side = msg.get("side")
         if sym not in self.SYMS:
             return
         if side not in ("buy", "sell"):
@@ -3548,24 +3166,6 @@ class Strategy(StrategyV19):
             self._scalp_out_quote(sym, side)
         except Exception as e:
             print(f"[v20.3 SCALP:{sym}-ERR] {type(e).__name__}: {e}")
-
-    # ==================================================================
-    # v20.15: book event override — fire shadow-dime scan AFTER super
-    # so super()'s normal MM / inter_sweep / dime_defense flow updates
-    # `s.book` and `s.resting` first.
-    # ==================================================================
-    def on_book_event(self, msg: dict) -> None:
-        super().on_book_event(msg)
-        sym = msg.get("symbol")
-        if sym not in self.SYMS:
-            return
-        if not self.cfg.shadow_dime_enabled:
-            return
-        try:
-            self._maybe_shadow_dime(sym)
-        except Exception as e:
-            print(f"[v20.15 SHADOW-DIME-ERR:{sym}] "
-                  f"{type(e).__name__}: {e}")
 
     def _scalp_out_quote(self, sym: str, fill_side: str) -> None:
         """Post the OPPOSITE side at fair ± min_edge (stepped inside
@@ -3855,12 +3455,6 @@ class Strategy(StrategyV19):
             self._cross_arb_qty_used = {s: 0 for s in self.SYMS}
             self._bounds_arb_qty_used = {s: 0 for s in self.SYMS}
             self._arb_table = {}
-            # v20.15: cancel every shadow at round end so we don't
-            # carry stale resting orders into settling. Server flushes
-            # orders on phase change, but a defensive cancel keeps
-            # our local tracking dict accurate.
-            for s in self.SYMS:
-                self._shadow_resting[s] = {"bid": {}, "ask": {}}
 
     def _reset_per_round_state(self) -> None:
         """v20.12: zero everything that should be fresh for a new
@@ -3916,15 +3510,6 @@ class Strategy(StrategyV19):
         self._tape_print_count = {s: 0 for s in self.SYMS}
         self._bounds_arb_count = 0
         self._reveal_sweep_cd_count = 0
-
-        # 7. v20.15: shadow-dime throttle clocks + dict. The server
-        # already flushed orders at phase end, so any locally-tracked
-        # shadow OIDs are dead.
-        self._last_shadow_dime_t = {s: 0.0 for s in self.SYMS}
-        for sym in self.SYMS:
-            self._shadow_resting[sym] = {"bid": {}, "ask": {}}
-        self._shadow_dime_post_count = 0
-        self._shadow_dime_fill_count = 0
 
     # ==================================================================
     # Status helpers (for the runner)
