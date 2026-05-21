@@ -377,7 +377,13 @@ class Probe:
         # messages provided by the exchange are given in the notebook").
         # Anything we haven't seen before is logged as raw_unknown_msg.
         documented_untyped = {"quote_add", "quote_cancel", "quote_fill",
-                              "quote_modify", "hello"}
+                              "quote_modify", "hello",
+                              # tick_settlement: per-reveal credit on B
+                              # (PnL = trade_cash + tick_cash * mult).
+                              # strikes: instrument metadata (strike list).
+                              # Both stream regularly — logged but not
+                              # printed so they don't flood the terminal.
+                              "tick_settlement", "strikes"}
         kind = t if t in documented_untyped else "raw_unknown_msg"
         self.log(kind, **msg)
         # Quote-* events fire many times per second and would flood the terminal.

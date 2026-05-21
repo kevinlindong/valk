@@ -1,0 +1,2044 @@
+{
+  "ts": 1779254973.446028,
+  "target": "http://192.168.50.167:8000",
+  "documented": {
+    "/api/game": {
+      "status": 200,
+      "ct": "application/json",
+      "len": 574,
+      "body": {
+        "phase": "running",
+        "paused": false,
+        "reveals": [
+          11,
+          10,
+          13,
+          9,
+          6
+        ],
+        "running_sum": 49,
+        "remaining_seconds": 9.797000000020489,
+        "duration": 90,
+        "reveal_interval": 15,
+        "instruments": {
+          "A": {
+            "symbol": "A",
+            "settlement": "identity",
+            "settlement_params": {},
+            "tick_size": 1,
+            "position_limit": 50,
+            "multiplier": 1
+          },
+          "B": {
+            "symbol": "B",
+            "settlement": "next_number",
+            "settlement_params": {},
+            "tick_size": 1,
+            "position_limit": 100,
+            "multiplier": 5
+          }
+        },
+        "settle_prices": {},
+        "latency": {
+          "processing_ms": 5,
+          "public_feed_ms": 20
+        },
+        "rate_limit": {
+          "max_per_second": 20,
+          "lockout_seconds": 3.0
+        },
+        "fees": {
+          "maker_per_lot": 0.5,
+          "taker_per_lot": 0.5
+        }
+      }
+    },
+    "/api/instruments": {
+      "status": 200,
+      "ct": "application/json",
+      "len": 235,
+      "body": {
+        "A": {
+          "symbol": "A",
+          "settlement": "identity",
+          "settlement_params": {},
+          "tick_size": 1,
+          "position_limit": 50,
+          "multiplier": 1
+        },
+        "B": {
+          "symbol": "B",
+          "settlement": "next_number",
+          "settlement_params": {},
+          "tick_size": 1,
+          "position_limit": 100,
+          "multiplier": 5
+        }
+      }
+    },
+    "/api/positions": {
+      "status": 200,
+      "ct": "application/json",
+      "len": 86,
+      "body": {
+        "trader": "KEVD",
+        "positions": {
+          "A": 14
+        },
+        "cash": {
+          "A": -838
+        },
+        "fees": {
+          "A": 22.0
+        },
+        "trades": 15
+      }
+    },
+    "/api/leaderboard": {
+      "status": 200,
+      "ct": "application/json",
+      "len": 5128,
+      "body": {
+        "rows": [
+          {
+            "trader": "CVALK",
+            "positions": {
+              "B": 0
+            },
+            "cash": {
+              "B": 128
+            },
+            "fees": 46.0,
+            "fees_by_symbol": {
+              "B": 46.0
+            },
+            "pnl": 640,
+            "pnl_by_symbol": {
+              "B": 640
+            },
+            "trades": 22,
+            "is_bot": true
+          },
+          {
+            "trader": "SEAN",
+            "positions": {
+              "A": -5,
+              "B": -6
+            },
+            "cash": {
+              "A": 465,
+              "B": 101
+            },
+            "fees": 56.0,
+            "fees_by_symbol": {
+              "A": 30.5,
+              "B": 25.5
+            },
+            "pnl": 375,
+            "pnl_by_symbol": {
+              "A": 170,
+              "B": 205
+            },
+            "trades": 36,
+            "is_bot": false
+          },
+          {
+            "trader": "VALKE",
+            "positions": {
+              "A": -14
+            },
+            "cash": {
+              "A": 1084
+            },
+            "fees": 40.0,
+            "fees_by_symbol": {
+              "A": 40.0
+            },
+            "pnl": 258,
+            "pnl_by_symbol": {
+              "A": 258
+            },
+            "trades": 23,
+            "is_bot": true
+          },
+          {
+            "trader": "BAZC",
+            "positions": {
+              "B": -1,
+              "A": 20
+            },
+            "cash": {
+              "B": 61,
+              "A": -1211
+            },
+            "fees": 100.5,
+            "fees_by_symbol": {
+              "B": 55.5,
+              "A": 45.0
+            },
+            "pnl": 224,
+            "pnl_by_symbol": {
+              "A": -31,
+              "B": 255
+            },
+            "trades": 87,
+            "is_bot": false
+          },
+          {
+            "trader": "VALKL",
+            "positions": {
+              "A": 15
+            },
+            "cash": {
+              "A": -704
+            },
+            "fees": 7.5,
+            "fees_by_symbol": {
+              "A": 7.5
+            },
+            "pnl": 181,
+            "pnl_by_symbol": {
+              "A": 181
+            },
+            "trades": 8,
+            "is_bot": true
+          },
+          {
+            "trader": "BRYA",
+            "positions": {
+              "A": 2,
+              "B": -3
+            },
+            "cash": {
+              "A": -121,
+              "B": 62
+            },
+            "fees": 62.5,
+            "fees_by_symbol": {
+              "A": 23.0,
+              "B": 39.5
+            },
+            "pnl": 157,
+            "pnl_by_symbol": {
+              "A": -3,
+              "B": 160
+            },
+            "trades": 49,
+            "is_bot": false
+          },
+          {
+            "trader": "CHAR",
+            "positions": {
+              "A": -2
+            },
+            "cash": {
+              "A": 201
+            },
+            "fees": 18.0,
+            "fees_by_symbol": {
+              "A": 18.0
+            },
+            "pnl": 83,
+            "pnl_by_symbol": {
+              "A": 83
+            },
+            "trades": 36,
+            "is_bot": false
+          },
+          {
+            "trader": "JVALK",
+            "positions": {
+              "B": 0
+            },
+            "cash": {
+              "B": 16
+            },
+            "fees": 19.5,
+            "fees_by_symbol": {
+              "B": 19.5
+            },
+            "pnl": 80,
+            "pnl_by_symbol": {
+              "B": 80
+            },
+            "trades": 13,
+            "is_bot": true
+          },
+          {
+            "trader": "VALKC",
+            "positions": {
+              "A": -7
+            },
+            "cash": {
+              "A": 455
+            },
+            "fees": 6.5,
+            "fees_by_symbol": {
+              "A": 6.5
+            },
+            "pnl": 42,
+            "pnl_by_symbol": {
+              "A": 42
+            },
+            "trades": 7,
+            "is_bot": true
+          },
+          {
+            "trader": "VALKD",
+            "positions": {
+              "A": -4
+            },
+            "cash": {
+              "A": 267
+            },
+            "fees": 29.0,
+            "fees_by_symbol": {
+              "A": 29.0
+            },
+            "pnl": 31,
+            "pnl_by_symbol": {
+              "A": 31
+            },
+            "trades": 34,
+            "is_bot": true
+          },
+          {
+            "trader": "VALKJ",
+            "positions": {
+              "A": -3
+            },
+            "cash": {
+              "A": 198
+            },
+            "fees": 1.5,
+            "fees_by_symbol": {
+              "A": 1.5
+            },
+            "pnl": 21,
+            "pnl_by_symbol": {
+              "A": 21
+            },
+            "trades": 1,
+            "is_bot": true
+          },
+          {
+            "trader": "RYAN",
+            "positions": {
+              "A": 1
+            },
+            "cash": {
+              "A": -39
+            },
+            "fees": 25.5,
+            "fees_by_symbol": {
+              "A": 25.5
+            },
+            "pnl": 20,
+            "pnl_by_symbol": {
+              "A": 20
+            },
+            "trades": 35,
+            "is_bot": false
+          },
+          {
+            "trader": "DVALK",
+            "positions": {
+              "B": -7
+            },
+            "cash": {
+              "B": 72
+            },
+            "fees": 25.5,
+            "fees_by_symbol": {
+              "B": 25.5
+            },
+            "pnl": 10,
+            "pnl_by_symbol": {
+              "B": 10
+            },
+            "trades": 11,
+            "is_bot": true
+          },
+          {
+            "trader": "AARU",
+            "positions": {},
+            "cash": {},
+            "fees": 0,
+            "fees_by_symbol": {},
+            "pnl": 0,
+            "pnl_by_symbol": {},
+            "trades": 0,
+            "is_bot": false
+          },
+          {
+            "trader": "VARU",
+            "positions": {},
+            "cash": {},
+            "fees": 0,
+            "fees_by_symbol": {},
+            "pnl": 0,
+            "pnl_by_symbol": {},
+            "trades": 0,
+            "is_bot": false
+          },
+          {
+            "trader": "ERIK",
+            "positions": {},
+            "cash": {},
+            "fees": 0,
+            "fees_by_symbol": {},
+            "pnl": 0,
+            "pnl_by_symbol": {},
+            "trades": 0,
+            "is_bot": false
+          },
+          {
+            "trader": "VALKN",
+            "positions": {},
+            "cash": {},
+            "fees": 0,
+            "fees_by_symbol": {},
+            "pnl": 0,
+            "pnl_by_symbol": {},
+            "trades": 0,
+            "is_bot": true
+          },
+          {
+            "trader": "GVALK",
+            "positions": {},
+            "cash": {},
+            "fees": 0,
+            "fees_by_symbol": {},
+            "pnl": 0,
+            "pnl_by_symbol": {},
+            "trades": 0,
+            "is_bot": true
+          },
+          {
+            "trader": "IVALK",
+            "positions": {},
+            "cash": {},
+            "fees": 0,
+            "fees_by_symbol": {},
+            "pnl": 0,
+            "pnl_by_symbol": {},
+            "trades": 0,
+            "is_bot": true
+          },
+          {
+            "trader": "VALKM",
+            "positions": {
+              "A": 3
+            },
+            "cash": {
+              "A": -186
+            },
+            "fees": 1.5,
+            "fees_by_symbol": {
+              "A": 1.5
+            },
+            "pnl": -9,
+            "pnl_by_symbol": {
+              "A": -9
+            },
+            "trades": 1,
+            "is_bot": true
+          },
+          {
+            "trader": "KEVD",
+            "positions": {
+              "A": 14
+            },
+            "cash": {
+              "A": -838
+            },
+            "fees": 22.0,
+            "fees_by_symbol": {
+              "A": 22.0
+            },
+            "pnl": -12,
+            "pnl_by_symbol": {
+              "A": -12
+            },
+            "trades": 15,
+            "is_bot": false
+          },
+          {
+            "trader": "VALKB",
+            "positions": {
+              "A": 4
+            },
+            "cash": {
+              "A": -260
+            },
+            "fees": 31.0,
+            "fees_by_symbol": {
+              "A": 31.0
+            },
+            "pnl": -24,
+            "pnl_by_symbol": {
+              "A": -24
+            },
+            "trades": 43,
+            "is_bot": true
+          },
+          {
+            "trader": "VALKK",
+            "positions": {
+              "A": -5
+            },
+            "cash": {
+              "A": 270
+            },
+            "fees": 11.5,
+            "fees_by_symbol": {
+              "A": 11.5
+            },
+            "pnl": -25,
+            "pnl_by_symbol": {
+              "A": -25
+            },
+            "trades": 14,
+            "is_bot": true
+          },
+          {
+            "trader": "AVALK",
+            "positions": {
+              "B": 0
+            },
+            "cash": {
+              "B": -6
+            },
+            "fees": 22.5,
+            "fees_by_symbol": {
+              "B": 22.5
+            },
+            "pnl": -30,
+            "pnl_by_symbol": {
+              "B": -30
+            },
+            "trades": 10,
+            "is_bot": true
+          },
+          {
+            "trader": "VALKF",
+            "positions": {
+              "A": -9
+            },
+            "cash": {
+              "A": 486
+            },
+            "fees": 4.5,
+            "fees_by_symbol": {
+              "A": 4.5
+            },
+            "pnl": -45,
+            "pnl_by_symbol": {
+              "A": -45
+            },
+            "trades": 4,
+            "is_bot": true
+          },
+          {
+            "trader": "VALKG",
+            "positions": {
+              "A": 0
+            },
+            "cash": {
+              "A": -51
+            },
+            "fees": 26.0,
+            "fees_by_symbol": {
+              "A": 26.0
+            },
+            "pnl": -51,
+            "pnl_by_symbol": {
+              "A": -51
+            },
+            "trades": 31,
+            "is_bot": true
+          },
+          {
+            "trader": "HVALK",
+            "positions": {
+              "B": 0
+            },
+            "cash": {
+              "B": -24
+            },
+            "fees": 6.5,
+            "fees_by_symbol": {
+              "B": 6.5
+            },
+            "pnl": -120,
+            "pnl_by_symbol": {
+              "B": -120
+            },
+            "trades": 6,
+            "is_bot": true
+          },
+          {
+            "trader": "VALKH",
+            "positions": {
+              "A": 0
+            },
+            "cash": {
+              "A": -121
+            },
+            "fees": 12.0,
+            "fees_by_symbol": {
+              "A": 12.0
+            },
+            "pnl": -121,
+            "pnl_by_symbol": {
+              "A": -121
+            },
+            "trades": 8,
+            "is_bot": true
+          },
+          {
+            "trader": "VALKA",
+            "positions": {
+              "A": -21
+            },
+            "cash": {
+              "A": 1092
+            },
+            "fees": 10.5,
+            "fees_by_symbol": {
+              "A": 10.5
+            },
+            "pnl": -147,
+            "pnl_by_symbol": {
+              "A": -147
+            },
+            "trades": 8,
+            "is_bot": true
+          },
+          {
+            "trader": "FVALK",
+            "positions": {
+              "B": -1
+            },
+            "cash": {
+              "B": -43
+            },
+            "fees": 30.5,
+            "fees_by_symbol": {
+              "B": 30.5
+            },
+            "pnl": -265,
+            "pnl_by_symbol": {
+              "B": -265
+            },
+            "trades": 30,
+            "is_bot": true
+          },
+          {
+            "trader": "VALKO",
+            "positions": {
+              "A": 11
+            },
+            "cash": {
+              "A": -987
+            },
+            "fees": 130.5,
+            "fees_by_symbol": {
+              "A": 130.5
+            },
+            "pnl": -338,
+            "pnl_by_symbol": {
+              "A": -338
+            },
+            "trades": 94,
+            "is_bot": true
+          },
+          {
+            "trader": "EVALK",
+            "positions": {
+              "B": 16
+            },
+            "cash": {
+              "B": -252
+            },
+            "fees": 72.5,
+            "fees_by_symbol": {
+              "B": 72.5
+            },
+            "pnl": -460,
+            "pnl_by_symbol": {
+              "B": -460
+            },
+            "trades": 32,
+            "is_bot": true
+          },
+          {
+            "trader": "BVALK",
+            "positions": {
+              "B": 2
+            },
+            "cash": {
+              "B": -115
+            },
+            "fees": 29.5,
+            "fees_by_symbol": {
+              "B": 29.5
+            },
+            "pnl": -475,
+            "pnl_by_symbol": {
+              "B": -475
+            },
+            "trades": 34,
+            "is_bot": true
+          }
+        ]
+      }
+    },
+    "/api/book?symbol=A&depth=20": {
+      "status": 200,
+      "ct": "application/json",
+      "len": 398,
+      "body": {
+        "symbol": "A",
+        "bids": [
+          {
+            "price": 57,
+            "qty": 6
+          },
+          {
+            "price": 56,
+            "qty": 2
+          },
+          {
+            "price": 55,
+            "qty": 5
+          },
+          {
+            "price": 53,
+            "qty": 5
+          },
+          {
+            "price": 52,
+            "qty": 5
+          },
+          {
+            "price": 51,
+            "qty": 8
+          },
+          {
+            "price": 49,
+            "qty": 5
+          },
+          {
+            "price": 40,
+            "qty": 4
+          }
+        ],
+        "asks": [
+          {
+            "price": 59,
+            "qty": 6
+          },
+          {
+            "price": 62,
+            "qty": 2
+          },
+          {
+            "price": 63,
+            "qty": 5
+          },
+          {
+            "price": 64,
+            "qty": 19
+          },
+          {
+            "price": 66,
+            "qty": 10
+          },
+          {
+            "price": 69,
+            "qty": 6
+          },
+          {
+            "price": 70,
+            "qty": 1
+          },
+          {
+            "price": 71,
+            "qty": 4
+          }
+        ],
+        "ts_ns": 1779254955694097000
+      }
+    },
+    "/api/orders": {
+      "status": 200,
+      "ct": "application/json",
+      "len": 201,
+      "body": {
+        "orders": [
+          {
+            "order_id": 229322,
+            "symbol": "A",
+            "trader": "KEVD",
+            "side": "buy",
+            "price": 53,
+            "qty": 5,
+            "remaining": 5,
+            "type": "limit",
+            "tif": "gtc",
+            "status": "open",
+            "ts_ns": 1779254950463116600,
+            "client_order_id": null
+          }
+        ]
+      }
+    }
+  },
+  "http_probes": [
+    {
+      "path": "/admin",
+      "method": "GET",
+      "status": 404,
+      "len": 22,
+      "ct": "application/json"
+    },
+    {
+      "path": "/admin",
+      "method": "OPTIONS",
+      "status": 404,
+      "len": 22,
+      "ct": "application/json"
+    },
+    {
+      "path": "/admin/",
+      "method": "GET",
+      "status": 404,
+      "len": 22,
+      "ct": "application/json"
+    },
+    {
+      "path": "/admin/",
+      "method": "OPTIONS",
+      "status": 404,
+      "len": 22,
+      "ct": "application/json"
+    },
+    {
+      "path": "/api/admin",
+      "method": "GET",
+      "status": 404,
+      "len": 22,
+      "ct": "application/json"
+    },
+    {
+      "path": "/api/admin",
+      "method": "OPTIONS",
+      "status": 404,
+      "len": 22,
+      "ct": "application/json"
+    },
+    {
+      "path": "/api/debug",
+      "method": "GET",
+      "status": 404,
+      "len": 22,
+      "ct": "application/json"
+    },
+    {
+      "path": "/api/debug",
+      "method": "OPTIONS",
+      "status": 404,
+      "len": 22,
+      "ct": "application/json"
+    },
+    {
+      "path": "/api/dev",
+      "method": "GET",
+      "status": 404,
+      "len": 22,
+      "ct": "application/json"
+    },
+    {
+      "path": "/api/dev",
+      "method": "OPTIONS",
+      "status": 404,
+      "len": 22,
+      "ct": "application/json"
+    },
+    {
+      "path": "/api/internal",
+      "method": "GET",
+      "status": 404,
+      "len": 22,
+      "ct": "application/json"
+    },
+    {
+      "path": "/api/internal",
+      "method": "OPTIONS",
+      "status": 404,
+      "len": 22,
+      "ct": "application/json"
+    },
+    {
+      "path": "/api/secret",
+      "method": "GET",
+      "status": 404,
+      "len": 22,
+      "ct": "application/json"
+    },
+    {
+      "path": "/api/secret",
+      "method": "OPTIONS",
+      "status": 404,
+      "len": 22,
+      "ct": "application/json"
+    },
+    {
+      "path": "/api/private",
+      "method": "GET",
+      "status": 404,
+      "len": 22,
+      "ct": "application/json"
+    },
+    {
+      "path": "/api/private",
+      "method": "OPTIONS",
+      "status": 404,
+      "len": 22,
+      "ct": "application/json"
+    },
+    {
+      "path": "/api/_debug",
+      "method": "GET",
+      "status": 404,
+      "len": 22,
+      "ct": "application/json"
+    },
+    {
+      "path": "/api/_debug",
+      "method": "OPTIONS",
+      "status": 404,
+      "len": 22,
+      "ct": "application/json"
+    },
+    {
+      "path": "/api/_dev",
+      "method": "GET",
+      "status": 404,
+      "len": 22,
+      "ct": "application/json"
+    },
+    {
+      "path": "/api/_dev",
+      "method": "OPTIONS",
+      "status": 404,
+      "len": 22,
+      "ct": "application/json"
+    },
+    {
+      "path": "/api/_internal",
+      "method": "GET",
+      "status": 404,
+      "len": 22,
+      "ct": "application/json"
+    },
+    {
+      "path": "/api/_internal",
+      "method": "OPTIONS",
+      "status": 404,
+      "len": 22,
+      "ct": "application/json"
+    },
+    {
+      "path": "/api/raw",
+      "method": "GET",
+      "status": 404,
+      "len": 22,
+      "ct": "application/json"
+    },
+    {
+      "path": "/api/raw",
+      "method": "OPTIONS",
+      "status": 404,
+      "len": 22,
+      "ct": "application/json"
+    },
+    {
+      "path": "/health",
+      "method": "GET",
+      "status": 404,
+      "len": 22,
+      "ct": "application/json"
+    },
+    {
+      "path": "/health",
+      "method": "OPTIONS",
+      "status": 404,
+      "len": 22,
+      "ct": "application/json"
+    },
+    {
+      "path": "/healthz",
+      "method": "GET",
+      "status": 404,
+      "len": 22,
+      "ct": "application/json"
+    },
+    {
+      "path": "/healthz",
+      "method": "OPTIONS",
+      "status": 404,
+      "len": 22,
+      "ct": "application/json"
+    },
+    {
+      "path": "/readyz",
+      "method": "GET",
+      "status": 404,
+      "len": 22,
+      "ct": "application/json"
+    },
+    {
+      "path": "/readyz",
+      "method": "OPTIONS",
+      "status": 404,
+      "len": 22,
+      "ct": "application/json"
+    },
+    {
+      "path": "/livez",
+      "method": "GET",
+      "status": 404,
+      "len": 22,
+      "ct": "application/json"
+    },
+    {
+      "path": "/livez",
+      "method": "OPTIONS",
+      "status": 404,
+      "len": 22,
+      "ct": "application/json"
+    },
+    {
+      "path": "/status",
+      "method": "GET",
+      "status": 404,
+      "len": 22,
+      "ct": "application/json"
+    },
+    {
+      "path": "/status",
+      "method": "OPTIONS",
+      "status": 404,
+      "len": 22,
+      "ct": "application/json"
+    },
+    {
+      "path": "/metrics",
+      "method": "GET",
+      "status": 404,
+      "len": 22,
+      "ct": "application/json"
+    },
+    {
+      "path": "/metrics",
+      "method": "OPTIONS",
+      "status": 404,
+      "len": 22,
+      "ct": "application/json"
+    },
+    {
+      "path": "/api/metrics",
+      "method": "GET",
+      "status": 404,
+      "len": 22,
+      "ct": "application/json"
+    },
+    {
+      "path": "/api/metrics",
+      "method": "OPTIONS",
+      "status": 404,
+      "len": 22,
+      "ct": "application/json"
+    },
+    {
+      "path": "/api/health",
+      "method": "GET",
+      "status": 404,
+      "len": 22,
+      "ct": "application/json"
+    },
+    {
+      "path": "/api/health",
+      "method": "OPTIONS",
+      "status": 404,
+      "len": 22,
+      "ct": "application/json"
+    },
+    {
+      "path": "/version",
+      "method": "GET",
+      "status": 404,
+      "len": 22,
+      "ct": "application/json"
+    },
+    {
+      "path": "/version",
+      "method": "OPTIONS",
+      "status": 404,
+      "len": 22,
+      "ct": "application/json"
+    },
+    {
+      "path": "/api/version",
+      "method": "GET",
+      "status": 404,
+      "len": 22,
+      "ct": "application/json"
+    },
+    {
+      "path": "/api/version",
+      "method": "OPTIONS",
+      "status": 404,
+      "len": 22,
+      "ct": "application/json"
+    },
+    {
+      "path": "/api/info",
+      "method": "GET",
+      "status": 404,
+      "len": 22,
+      "ct": "application/json"
+    },
+    {
+      "path": "/api/info",
+      "method": "OPTIONS",
+      "status": 404,
+      "len": 22,
+      "ct": "application/json"
+    },
+    {
+      "path": "/docs",
+      "method": "GET",
+      "status": 200,
+      "len": 941,
+      "ct": "text/html; charset=utf-8",
+      "body_preview": "\n    <!DOCTYPE html>\n    <html>\n    <head>\n    <link type=\"text/css\" rel=\"stylesheet\" href=\"https://cdn.jsdelivr.net/npm/swagger-ui-dist@5/swagger-ui.css\">\n    <link rel=\"shortcut icon\" href=\"https://fastapi.tiangolo.com/img/favicon.png\">\n    <title>Algo Trading Game - Swagger UI</title>\n    </head>\n    <body>\n    <div id=\"swagger-ui\">\n    </div>\n    <script src=\"https://cdn.jsdelivr.net/npm/swagger-ui-dist@5/swagger-ui-bundle.js\"></script>\n    <!-- `SwaggerUIBundle` is now available on the page -->\n    <script>\n    const ui = SwaggerUIBundle({\n        url: '/openapi.json',\n    \"dom_id\": \"#swagger-ui\",\n\"layout\": \"BaseLayout\",\n\"deepLinking\": true,\n\"showExtensions\": true,\n\"showCommonExtensions\": true,\noauth2RedirectUrl: window.location.origin + '/docs/oauth2-redirect',\n    presets: [\n        SwaggerUIBundle.presets.apis,\n        SwaggerUIBundle.SwaggerUIStandalonePreset\n        ],\n    })\n    </script>\n    </body>\n    </html>\n    "
+    },
+    {
+      "path": "/docs",
+      "method": "OPTIONS",
+      "status": 405,
+      "len": 31,
+      "ct": "application/json"
+    },
+    {
+      "path": "/redoc",
+      "method": "GET",
+      "status": 200,
+      "len": 901,
+      "ct": "text/html; charset=utf-8",
+      "body_preview": "\n    <!DOCTYPE html>\n    <html>\n    <head>\n    <title>Algo Trading Game - ReDoc</title>\n    <!-- needed for adaptive design -->\n    <meta charset=\"utf-8\"/>\n    <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n    \n    <link href=\"https://fonts.googleapis.com/css?family=Montserrat:300,400,700|Roboto:300,400,700\" rel=\"stylesheet\">\n    \n    <link rel=\"shortcut icon\" href=\"https://fastapi.tiangolo.com/img/favicon.png\">\n    <!--\n    ReDoc doesn't change outer page styles\n    -->\n    <style>\n      body {\n        margin: 0;\n        padding: 0;\n      }\n    </style>\n    </head>\n    <body>\n    <noscript>\n        ReDoc requires Javascript to function. Please enable it to browse the documentation.\n    </noscript>\n    <redoc spec-url=\"/openapi.json\"></redoc>\n    <script src=\"https://cdn.jsdelivr.net/npm/redoc@next/bundles/redoc.standalone.js\"> </script>\n    </body>\n    </html>\n    "
+    },
+    {
+      "path": "/redoc",
+      "method": "OPTIONS",
+      "status": 405,
+      "len": 31,
+      "ct": "application/json"
+    },
+    {
+      "path": "/openapi.json",
+      "method": "GET",
+      "status": 200,
+      "len": 23548,
+      "ct": "application/json",
+      "body_preview": "{\"openapi\":\"3.1.0\",\"info\":{\"title\":\"Algo Trading Game\",\"version\":\"0.1.0\"},\"paths\":{\"/api/order\":{\"post\":{\"summary\":\"Post Order\",\"operationId\":\"post_order_api_order_post\",\"parameters\":[{\"name\":\"X-API-Key\",\"in\":\"header\",\"required\":false,\"schema\":{\"anyOf\":[{\"type\":\"string\"},{\"type\":\"null\"}],\"title\":\"X-Api-Key\"}}],\"requestBody\":{\"required\":true,\"content\":{\"application/json\":{\"schema\":{\"$ref\":\"#/components/schemas/OrderReq\"}}}},\"responses\":{\"200\":{\"description\":\"Successful Response\",\"content\":{\"application/json\":{\"schema\":{}}}},\"422\":{\"description\":\"Validation Error\",\"content\":{\"application/json\":{\"schema\":{\"$ref\":\"#/components/schemas/HTTPValidationError\"}}}}}}},\"/api/order/{order_id}\":{\"patch\":{\"summary\":\"Modify Order\",\"operationId\":\"modify_order_api_order__order_id__patch\",\"parameters\":[{\"name\":\"order_id\",\"in\":\"path\",\"required\":true,\"schema\":{\"type\":\"integer\",\"title\":\"Order Id\"}},{\"name\":\"X-API-Key\",\"in\":\"header\",\"required\":false,\"schema\":{\"anyOf\":[{\"type\":\"string\"},{\"type\":\"null\"}],\"title\":\"X-Api-Key\"}}],\"requestBody\":{\"required\":true,\"content\":{\"application/json\":{\"schema\":{\"$ref\":\"#/components/schemas/ModifyReq\"}}}},\"responses\":{\"200\":{\"description\":\"Successful Response\",\"content\":{\"application/json\":{\"schema\":{}}}},\"422\":{\"description\":\"Validation Error\",\"content\":{\"application/json\":{\"schema\":{\"$ref\":\"#/components/schemas/HTTPValidationError\"}}}}}},\"delete\":{\"summary\":\"Cancel\",\"operationId\":\"cancel_api_order__order_id__delete\",\"parameters\":[{\"name\":\"order_id\",\"in\":\"path\",\"required\":true,\"schema\":{\"type\":\"integer\",\"title\":\"Order Id\"}},{\"name\":\"X-API-Key\",\"in\":\"header\",\"required\":false,\"schema\":{\"anyOf\":[{\"type\":\"string\"},{\"type\":\"null\"}],\"title\":\"X-Api-Key\"}}],\"responses\":{\"200\":{\"description\":\"Successful Response\",\"content\":{\"application/json\":{\"schema\":{}}}},\"422\":{\"description\":\"Validation Error\",\"content\":{\"application/json\":{\"schema\":{\"$ref\":\"#/components/schemas/HTTPValidationError\"}}}}}}},\"/api/orders\":{\"delete\":{\"summary\":\"Cancel All\",\"operationId\":\"cancel"
+    },
+    {
+      "path": "/openapi.json",
+      "method": "OPTIONS",
+      "status": 405,
+      "len": 31,
+      "ct": "application/json"
+    },
+    {
+      "path": "/swagger",
+      "method": "GET",
+      "status": 404,
+      "len": 22,
+      "ct": "application/json"
+    },
+    {
+      "path": "/swagger",
+      "method": "OPTIONS",
+      "status": 404,
+      "len": 22,
+      "ct": "application/json"
+    },
+    {
+      "path": "/swagger.json",
+      "method": "GET",
+      "status": 404,
+      "len": 22,
+      "ct": "application/json"
+    },
+    {
+      "path": "/swagger.json",
+      "method": "OPTIONS",
+      "status": 404,
+      "len": 22,
+      "ct": "application/json"
+    },
+    {
+      "path": "/api/docs",
+      "method": "GET",
+      "status": 404,
+      "len": 22,
+      "ct": "application/json"
+    },
+    {
+      "path": "/api/docs",
+      "method": "OPTIONS",
+      "status": 404,
+      "len": 22,
+      "ct": "application/json"
+    },
+    {
+      "path": "/api/openapi.json",
+      "method": "GET",
+      "status": 404,
+      "len": 22,
+      "ct": "application/json"
+    },
+    {
+      "path": "/api/openapi.json",
+      "method": "OPTIONS",
+      "status": 404,
+      "len": 22,
+      "ct": "application/json"
+    },
+    {
+      "path": "/api/schema",
+      "method": "GET",
+      "status": 404,
+      "len": 22,
+      "ct": "application/json"
+    },
+    {
+      "path": "/api/schema",
+      "method": "OPTIONS",
+      "status": 404,
+      "len": 22,
+      "ct": "application/json"
+    },
+    {
+      "path": "/__debug__/",
+      "method": "GET",
+      "status": 404,
+      "len": 22,
+      "ct": "application/json"
+    },
+    {
+      "path": "/__debug__/",
+      "method": "OPTIONS",
+      "status": 404,
+      "len": 22,
+      "ct": "application/json"
+    },
+    {
+      "path": "/.well-known/openapi",
+      "method": "GET",
+      "status": 404,
+      "len": 22,
+      "ct": "application/json"
+    },
+    {
+      "path": "/.well-known/openapi",
+      "method": "OPTIONS",
+      "status": 404,
+      "len": 22,
+      "ct": "application/json"
+    },
+    {
+      "path": "/api/game/full",
+      "method": "GET",
+      "status": 404,
+      "len": 22,
+      "ct": "application/json"
+    },
+    {
+      "path": "/api/game/full",
+      "method": "OPTIONS",
+      "status": 404,
+      "len": 22,
+      "ct": "application/json"
+    },
+    {
+      "path": "/api/game/debug",
+      "method": "GET",
+      "status": 404,
+      "len": 22,
+      "ct": "application/json"
+    },
+    {
+      "path": "/api/game/debug",
+      "method": "OPTIONS",
+      "status": 404,
+      "len": 22,
+      "ct": "application/json"
+    },
+    {
+      "path": "/api/game/state",
+      "method": "GET",
+      "status": 404,
+      "len": 22,
+      "ct": "application/json"
+    },
+    {
+      "path": "/api/game/state",
+      "method": "OPTIONS",
+      "status": 404,
+      "len": 22,
+      "ct": "application/json"
+    },
+    {
+      "path": "/api/game/raw",
+      "method": "GET",
+      "status": 404,
+      "len": 22,
+      "ct": "application/json"
+    },
+    {
+      "path": "/api/game/raw",
+      "method": "OPTIONS",
+      "status": 404,
+      "len": 22,
+      "ct": "application/json"
+    },
+    {
+      "path": "/api/game/secret",
+      "method": "GET",
+      "status": 404,
+      "len": 22,
+      "ct": "application/json"
+    },
+    {
+      "path": "/api/game/secret",
+      "method": "OPTIONS",
+      "status": 404,
+      "len": 22,
+      "ct": "application/json"
+    },
+    {
+      "path": "/api/game/params",
+      "method": "GET",
+      "status": 404,
+      "len": 22,
+      "ct": "application/json"
+    },
+    {
+      "path": "/api/game/params",
+      "method": "OPTIONS",
+      "status": 404,
+      "len": 22,
+      "ct": "application/json"
+    },
+    {
+      "path": "/api/game/seed",
+      "method": "GET",
+      "status": 404,
+      "len": 22,
+      "ct": "application/json"
+    },
+    {
+      "path": "/api/game/seed",
+      "method": "OPTIONS",
+      "status": 404,
+      "len": 22,
+      "ct": "application/json"
+    },
+    {
+      "path": "/api/seed",
+      "method": "GET",
+      "status": 404,
+      "len": 22,
+      "ct": "application/json"
+    },
+    {
+      "path": "/api/seed",
+      "method": "OPTIONS",
+      "status": 404,
+      "len": 22,
+      "ct": "application/json"
+    },
+    {
+      "path": "/api/rng",
+      "method": "GET",
+      "status": 404,
+      "len": 22,
+      "ct": "application/json"
+    },
+    {
+      "path": "/api/rng",
+      "method": "OPTIONS",
+      "status": 404,
+      "len": 22,
+      "ct": "application/json"
+    },
+    {
+      "path": "/api/settlement",
+      "method": "GET",
+      "status": 404,
+      "len": 22,
+      "ct": "application/json"
+    },
+    {
+      "path": "/api/settlement",
+      "method": "OPTIONS",
+      "status": 404,
+      "len": 22,
+      "ct": "application/json"
+    },
+    {
+      "path": "/api/settlement/preview",
+      "method": "GET",
+      "status": 404,
+      "len": 22,
+      "ct": "application/json"
+    },
+    {
+      "path": "/api/settlement/preview",
+      "method": "OPTIONS",
+      "status": 404,
+      "len": 22,
+      "ct": "application/json"
+    },
+    {
+      "path": "/api/settle",
+      "method": "GET",
+      "status": 404,
+      "len": 22,
+      "ct": "application/json"
+    },
+    {
+      "path": "/api/settle",
+      "method": "OPTIONS",
+      "status": 404,
+      "len": 22,
+      "ct": "application/json"
+    },
+    {
+      "path": "/api/settle/preview",
+      "method": "GET",
+      "status": 404,
+      "len": 22,
+      "ct": "application/json"
+    },
+    {
+      "path": "/api/settle/preview",
+      "method": "OPTIONS",
+      "status": 404,
+      "len": 22,
+      "ct": "application/json"
+    },
+    {
+      "path": "/api/reveals",
+      "method": "GET",
+      "status": 404,
+      "len": 22,
+      "ct": "application/json"
+    },
+    {
+      "path": "/api/reveals",
+      "method": "OPTIONS",
+      "status": 404,
+      "len": 22,
+      "ct": "application/json"
+    },
+    {
+      "path": "/api/reveals/all",
+      "method": "GET",
+      "status": 404,
+      "len": 22,
+      "ct": "application/json"
+    },
+    {
+      "path": "/api/reveals/all",
+      "method": "OPTIONS",
+      "status": 404,
+      "len": 22,
+      "ct": "application/json"
+    },
+    {
+      "path": "/api/players",
+      "method": "GET",
+      "status": 404,
+      "len": 22,
+      "ct": "application/json"
+    },
+    {
+      "path": "/api/players",
+      "method": "OPTIONS",
+      "status": 404,
+      "len": 22,
+      "ct": "application/json"
+    },
+    {
+      "path": "/api/players/all",
+      "method": "GET",
+      "status": 404,
+      "len": 22,
+      "ct": "application/json"
+    },
+    {
+      "path": "/api/players/all",
+      "method": "OPTIONS",
+      "status": 404,
+      "len": 22,
+      "ct": "application/json"
+    },
+    {
+      "path": "/api/users",
+      "method": "GET",
+      "status": 404,
+      "len": 22,
+      "ct": "application/json"
+    },
+    {
+      "path": "/api/users",
+      "method": "OPTIONS",
+      "status": 404,
+      "len": 22,
+      "ct": "application/json"
+    },
+    {
+      "path": "/api/bots",
+      "method": "GET",
+      "status": 404,
+      "len": 22,
+      "ct": "application/json"
+    },
+    {
+      "path": "/api/bots",
+      "method": "OPTIONS",
+      "status": 404,
+      "len": 22,
+      "ct": "application/json"
+    },
+    {
+      "path": "/api/keys",
+      "method": "GET",
+      "status": 404,
+      "len": 22,
+      "ct": "application/json"
+    },
+    {
+      "path": "/api/keys",
+      "method": "OPTIONS",
+      "status": 404,
+      "len": 22,
+      "ct": "application/json"
+    },
+    {
+      "path": "/api/accounts",
+      "method": "GET",
+      "status": 404,
+      "len": 22,
+      "ct": "application/json"
+    },
+    {
+      "path": "/api/accounts",
+      "method": "OPTIONS",
+      "status": 404,
+      "len": 22,
+      "ct": "application/json"
+    },
+    {
+      "path": "/api/instruments/A",
+      "method": "GET",
+      "status": 404,
+      "len": 22,
+      "ct": "application/json"
+    },
+    {
+      "path": "/api/instruments/A",
+      "method": "OPTIONS",
+      "status": 404,
+      "len": 22,
+      "ct": "application/json"
+    },
+    {
+      "path": "/api/instruments/A/params",
+      "method": "GET",
+      "status": 404,
+      "len": 22,
+      "ct": "application/json"
+    },
+    {
+      "path": "/api/instruments/A/params",
+      "method": "OPTIONS",
+      "status": 404,
+      "len": 22,
+      "ct": "application/json"
+    },
+    {
+      "path": "/api/instruments/A/secret",
+      "method": "GET",
+      "status": 404,
+      "len": 22,
+      "ct": "application/json"
+    },
+    {
+      "path": "/api/instruments/A/secret",
+      "method": "OPTIONS",
+      "status": 404,
+      "len": 22,
+      "ct": "application/json"
+    },
+    {
+      "path": "/api/instruments/A/debug",
+      "method": "GET",
+      "status": 404,
+      "len": 22,
+      "ct": "application/json"
+    },
+    {
+      "path": "/api/instruments/A/debug",
+      "method": "OPTIONS",
+      "status": 404,
+      "len": 22,
+      "ct": "application/json"
+    },
+    {
+      "path": "/api/truth",
+      "method": "GET",
+      "status": 404,
+      "len": 22,
+      "ct": "application/json"
+    },
+    {
+      "path": "/api/truth",
+      "method": "OPTIONS",
+      "status": 404,
+      "len": 22,
+      "ct": "application/json"
+    },
+    {
+      "path": "/api/answer",
+      "method": "GET",
+      "status": 404,
+      "len": 22,
+      "ct": "application/json"
+    },
+    {
+      "path": "/api/answer",
+      "method": "OPTIONS",
+      "status": 404,
+      "len": 22,
+      "ct": "application/json"
+    },
+    {
+      "path": "/api/oracle",
+      "method": "GET",
+      "status": 404,
+      "len": 22,
+      "ct": "application/json"
+    },
+    {
+      "path": "/api/oracle",
+      "method": "OPTIONS",
+      "status": 404,
+      "len": 22,
+      "ct": "application/json"
+    },
+    {
+      "path": "/api/a",
+      "method": "GET",
+      "status": 404,
+      "len": 22,
+      "ct": "application/json"
+    },
+    {
+      "path": "/api/a",
+      "method": "OPTIONS",
+      "status": 404,
+      "len": 22,
+      "ct": "application/json"
+    },
+    {
+      "path": "/api/w",
+      "method": "GET",
+      "status": 404,
+      "len": 22,
+      "ct": "application/json"
+    },
+    {
+      "path": "/api/w",
+      "method": "OPTIONS",
+      "status": 404,
+      "len": 22,
+      "ct": "application/json"
+    },
+    {
+      "path": "/api/params",
+      "method": "GET",
+      "status": 404,
+      "len": 22,
+      "ct": "application/json"
+    },
+    {
+      "path": "/api/params",
+      "method": "OPTIONS",
+      "status": 404,
+      "len": 22,
+      "ct": "application/json"
+    },
+    {
+      "path": "/config",
+      "method": "GET",
+      "status": 404,
+      "len": 22,
+      "ct": "application/json"
+    },
+    {
+      "path": "/config",
+      "method": "OPTIONS",
+      "status": 404,
+      "len": 22,
+      "ct": "application/json"
+    },
+    {
+      "path": "/config.json",
+      "method": "GET",
+      "status": 404,
+      "len": 22,
+      "ct": "application/json"
+    },
+    {
+      "path": "/config.json",
+      "method": "OPTIONS",
+      "status": 404,
+      "len": 22,
+      "ct": "application/json"
+    },
+    {
+      "path": "/.env",
+      "method": "GET",
+      "status": 404,
+      "len": 22,
+      "ct": "application/json"
+    },
+    {
+      "path": "/.env",
+      "method": "OPTIONS",
+      "status": 404,
+      "len": 22,
+      "ct": "application/json"
+    },
+    {
+      "path": "/static/",
+      "method": "GET",
+      "status": 404,
+      "len": 22,
+      "ct": "application/json"
+    },
+    {
+      "path": "/static/",
+      "method": "OPTIONS",
+      "status": 405,
+      "len": 31,
+      "ct": "application/json"
+    },
+    {
+      "path": "/api/config",
+      "method": "GET",
+      "status": 404,
+      "len": 22,
+      "ct": "application/json"
+    },
+    {
+      "path": "/api/config",
+      "method": "OPTIONS",
+      "status": 404,
+      "len": 22,
+      "ct": "application/json"
+    },
+    {
+      "path": "/api/.env",
+      "method": "GET",
+      "status": 404,
+      "len": 22,
+      "ct": "application/json"
+    },
+    {
+      "path": "/api/.env",
+      "method": "OPTIONS",
+      "status": 404,
+      "len": 22,
+      "ct": "application/json"
+    }
+  ],
+  "method_probes": [],
+  "ws_probes": [
+    {
+      "path": "ws://192.168.50.167:8000/ws",
+      "status": "fail",
+      "error": "InvalidStatus(Response(status_code=403, reason_phrase='Forbidden', headers=Headers([('Date', 'Wed, 20 May 2026 05:29:26 GMT'), ('Content-Length', '0'), ('Content-Type', 'text/plain'), ('Connection', 'close')]), body=bytearray(b''), _exception=InvalidStatus(...)))"
+    },
+    {
+      "path": "ws://192.168.50.167:8000/ws?api_key=intern2-KEVD",
+      "status": "fail",
+      "error": "InvalidStatus(Response(status_code=403, reason_phrase='Forbidden', headers=Headers([('Date', 'Wed, 20 May 2026 05:29:26 GMT'), ('Content-Length', '0'), ('Content-Type', 'text/plain'), ('Connection', 'close')]), body=bytearray(b''), _exception=InvalidStatus(...)))"
+    },
+    {
+      "path": "ws://192.168.50.167:8000/ws/",
+      "status": "fail",
+      "error": "InvalidStatus(Response(status_code=403, reason_phrase='Forbidden', headers=Headers([('Date', 'Wed, 20 May 2026 05:29:26 GMT'), ('Content-Length', '0'), ('Content-Type', 'text/plain'), ('Connection', 'close')]), body=bytearray(b''), _exception=InvalidStatus(...)))"
+    },
+    {
+      "path": "ws://192.168.50.167:8000/ws/?api_key=intern2-KEVD",
+      "status": "fail",
+      "error": "InvalidStatus(Response(status_code=403, reason_phrase='Forbidden', headers=Headers([('Date', 'Wed, 20 May 2026 05:29:26 GMT'), ('Content-Length', '0'), ('Content-Type', 'text/plain'), ('Connection', 'close')]), body=bytearray(b''), _exception=InvalidStatus(...)))"
+    },
+    {
+      "path": "ws://192.168.50.167:8000/ws/public",
+      "status": "open",
+      "msgs": [
+        {
+          "type": "game_state",
+          "phase": "settled",
+          "paused": false,
+          "reveals": [
+            11,
+            10,
+            13,
+            9,
+            6,
+            8
+          ],
+          "running_sum": 57,
+          "remaining_seconds": null,
+          "duration": 90,
+          "reveal_interval": 15,
+          "instruments": {
+            "A": {
+              "symbol": "A",
+              "settlement": "identity",
+              "settlement_params": {},
+              "tick_size": 1,
+              "position_limit": 50,
+              "multiplier": 1
+            },
+            "B": {
+              "symbol": "B",
+              "settlement": "next_number",
+              "settlement_params": {},
+              "tick_size": 1,
+              "position_limit": 100,
+              "multiplier": 5
+            }
+          },
+          "settle_prices": {
+            "A": 57,
+            "B": 8
+          },
+          "latency": {
+            "processing_ms": 5,
+            "public_feed_ms": 20
+          },
+          "rate_limit": {
+            "max_per_second": 20,
+            "lockout_seconds": 3.0
+          },
+          "fees": {
+            "maker_per_lot": 0.5,
+            "taker_per_lot": 0.5
+          },
+          "sent_ns": 1779254966969967600
+        },
+        {
+          "type": "book",
+          "symbol": "A",
+          "bids": [],
+          "asks": [],
+          "ts_ns": 1779254966969967600,
+          "sent_ns": 1779254966969967600
+        },
+        {
+          "type": "book",
+          "symbol": "B",
+          "bids": [],
+          "asks": [],
+          "ts_ns": 1779254966969967600,
+          "sent_ns": 1779254966969967600
+        }
+      ]
+    },
+    {
+      "path": "ws://192.168.50.167:8000/ws/public?api_key=intern2-KEVD",
+      "status": "open",
+      "msgs": [
+        {
+          "type": "game_state",
+          "phase": "settled",
+          "paused": false,
+          "reveals": [
+            11,
+            10,
+            13,
+            9,
+            6,
+            8
+          ],
+          "running_sum": 57,
+          "remaining_seconds": null,
+          "duration": 90,
+          "reveal_interval": 15,
+          "instruments": {
+            "A": {
+              "symbol": "A",
+              "settlement": "identity",
+              "settlement_params": {},
+              "tick_size": 1,
+              "position_limit": 50,
+              "multiplier": 1
+            },
+            "B": {
+              "symbol": "B",
+              "settlement": "next_number",
+              "settlement_params": {},
+              "tick_size": 1,
+              "position_limit": 100,
+              "multiplier": 5
+            }
+          },
+          "settle_prices": {
+            "A": 57,
+            "B": 8
+          },
+          "latency": {
+            "processing_ms": 5,
+            "public_feed_ms": 20
+          },
+          "rate_limit": {
+            "max_per_second": 20,
+            "lockout_seconds": 3.0
+          },
+          "fees": {
+            "maker_per_lot": 0.5,
+            "taker_per_lot": 0.5
+          },
+          "sent_ns": 1779254968594602000
+        },
+        {
+          "type": "book",
+          "symbol": "A",
+          "bids": [],
+          "asks": [],
+          "ts_ns": 1779254968594602000,
+          "sent_ns": 1779254968594602000
+        },
+        {
+          "type": "book",
+          "symbol": "B",
+          "bids": [],
+          "asks": [],
+          "ts_ns": 1779254968594602000,
+          "sent_ns": 1779254968594602000
+        }
+      ]
+    },
+    {
+      "path": "ws://192.168.50.167:8000/ws/admin",
+      "status": "fail",
+      "error": "InvalidStatus(Response(status_code=403, reason_phrase='Forbidden', headers=Headers([('Date', 'Wed, 20 May 2026 05:29:30 GMT'), ('Content-Length', '0'), ('Content-Type', 'text/plain'), ('Connection', 'close')]), body=bytearray(b''), _exception=InvalidStatus(...)))"
+    },
+    {
+      "path": "ws://192.168.50.167:8000/ws/admin?api_key=intern2-KEVD",
+      "status": "fail",
+      "error": "InvalidStatus(Response(status_code=403, reason_phrase='Forbidden', headers=Headers([('Date', 'Wed, 20 May 2026 05:29:30 GMT'), ('Content-Length', '0'), ('Content-Type', 'text/plain'), ('Connection', 'close')]), body=bytearray(b''), _exception=InvalidStatus(...)))"
+    },
+    {
+      "path": "ws://192.168.50.167:8000/ws/debug",
+      "status": "fail",
+      "error": "InvalidStatus(Response(status_code=403, reason_phrase='Forbidden', headers=Headers([('Date', 'Wed, 20 May 2026 05:29:30 GMT'), ('Content-Length', '0'), ('Content-Type', 'text/plain'), ('Connection', 'close')]), body=bytearray(b''), _exception=InvalidStatus(...)))"
+    },
+    {
+      "path": "ws://192.168.50.167:8000/ws/debug?api_key=intern2-KEVD",
+      "status": "fail",
+      "error": "InvalidStatus(Response(status_code=403, reason_phrase='Forbidden', headers=Headers([('Date', 'Wed, 20 May 2026 05:29:30 GMT'), ('Content-Length', '0'), ('Content-Type', 'text/plain'), ('Connection', 'close')]), body=bytearray(b''), _exception=InvalidStatus(...)))"
+    },
+    {
+      "path": "ws://192.168.50.167:8000/ws/observer",
+      "status": "fail",
+      "error": "InvalidStatus(Response(status_code=403, reason_phrase='Forbidden', headers=Headers([('Date', 'Wed, 20 May 2026 05:29:30 GMT'), ('Content-Length', '0'), ('Content-Type', 'text/plain'), ('Connection', 'close')]), body=bytearray(b''), _exception=InvalidStatus(...)))"
+    },
+    {
+      "path": "ws://192.168.50.167:8000/ws/observer?api_key=intern2-KEVD",
+      "status": "fail",
+      "error": "InvalidStatus(Response(status_code=403, reason_phrase='Forbidden', headers=Headers([('Date', 'Wed, 20 May 2026 05:29:30 GMT'), ('Content-Length', '0'), ('Content-Type', 'text/plain'), ('Connection', 'close')]), body=bytearray(b''), _exception=InvalidStatus(...)))"
+    },
+    {
+      "path": "ws://192.168.50.167:8000/ws/spectator",
+      "status": "fail",
+      "error": "InvalidStatus(Response(status_code=403, reason_phrase='Forbidden', headers=Headers([('Date', 'Wed, 20 May 2026 05:29:30 GMT'), ('Content-Length', '0'), ('Content-Type', 'text/plain'), ('Connection', 'close')]), body=bytearray(b''), _exception=InvalidStatus(...)))"
+    },
+    {
+      "path": "ws://192.168.50.167:8000/ws/spectator?api_key=intern2-KEVD",
+      "status": "fail",
+      "error": "InvalidStatus(Response(status_code=403, reason_phrase='Forbidden', headers=Headers([('Date', 'Wed, 20 May 2026 05:29:31 GMT'), ('Content-Length', '0'), ('Content-Type', 'text/plain'), ('Connection', 'close')]), body=bytearray(b''), _exception=InvalidStatus(...)))"
+    },
+    {
+      "path": "ws://192.168.50.167:8000/ws/game",
+      "status": "fail",
+      "error": "InvalidStatus(Response(status_code=403, reason_phrase='Forbidden', headers=Headers([('Date', 'Wed, 20 May 2026 05:29:31 GMT'), ('Content-Length', '0'), ('Content-Type', 'text/plain'), ('Connection', 'close')]), body=bytearray(b''), _exception=InvalidStatus(...)))"
+    },
+    {
+      "path": "ws://192.168.50.167:8000/ws/game?api_key=intern2-KEVD",
+      "status": "fail",
+      "error": "InvalidStatus(Response(status_code=403, reason_phrase='Forbidden', headers=Headers([('Date', 'Wed, 20 May 2026 05:29:31 GMT'), ('Content-Length', '0'), ('Content-Type', 'text/plain'), ('Connection', 'close')]), body=bytearray(b''), _exception=InvalidStatus(...)))"
+    },
+    {
+      "path": "ws://192.168.50.167:8000/ws/all",
+      "status": "fail",
+      "error": "InvalidStatus(Response(status_code=403, reason_phrase='Forbidden', headers=Headers([('Date', 'Wed, 20 May 2026 05:29:31 GMT'), ('Content-Length', '0'), ('Content-Type', 'text/plain'), ('Connection', 'close')]), body=bytearray(b''), _exception=InvalidStatus(...)))"
+    },
+    {
+      "path": "ws://192.168.50.167:8000/ws/all?api_key=intern2-KEVD",
+      "status": "fail",
+      "error": "InvalidStatus(Response(status_code=403, reason_phrase='Forbidden', headers=Headers([('Date', 'Wed, 20 May 2026 05:29:31 GMT'), ('Content-Length', '0'), ('Content-Type', 'text/plain'), ('Connection', 'close')]), body=bytearray(b''), _exception=InvalidStatus(...)))"
+    },
+    {
+      "path": "ws://192.168.50.167:8000/ws/v2",
+      "status": "fail",
+      "error": "InvalidStatus(Response(status_code=403, reason_phrase='Forbidden', headers=Headers([('Date', 'Wed, 20 May 2026 05:29:31 GMT'), ('Content-Length', '0'), ('Content-Type', 'text/plain'), ('Connection', 'close')]), body=bytearray(b''), _exception=InvalidStatus(...)))"
+    },
+    {
+      "path": "ws://192.168.50.167:8000/ws/v2?api_key=intern2-KEVD",
+      "status": "fail",
+      "error": "InvalidStatus(Response(status_code=403, reason_phrase='Forbidden', headers=Headers([('Date', 'Wed, 20 May 2026 05:29:31 GMT'), ('Content-Length', '0'), ('Content-Type', 'text/plain'), ('Connection', 'close')]), body=bytearray(b''), _exception=InvalidStatus(...)))"
+    },
+    {
+      "path": "ws://192.168.50.167:8000/ws/private/raw",
+      "status": "fail",
+      "error": "InvalidStatus(Response(status_code=403, reason_phrase='Forbidden', headers=Headers([('Date', 'Wed, 20 May 2026 05:29:31 GMT'), ('Content-Length', '0'), ('Content-Type', 'text/plain'), ('Connection', 'close')]), body=bytearray(b''), _exception=InvalidStatus(...)))"
+    },
+    {
+      "path": "ws://192.168.50.167:8000/ws/private/raw?api_key=intern2-KEVD",
+      "status": "fail",
+      "error": "InvalidStatus(Response(status_code=403, reason_phrase='Forbidden', headers=Headers([('Date', 'Wed, 20 May 2026 05:29:31 GMT'), ('Content-Length', '0'), ('Content-Type', 'text/plain'), ('Connection', 'close')]), body=bytearray(b''), _exception=InvalidStatus(...)))"
+    },
+    {
+      "path": "ws://192.168.50.167:8000/ws/internal",
+      "status": "fail",
+      "error": "InvalidStatus(Response(status_code=403, reason_phrase='Forbidden', headers=Headers([('Date', 'Wed, 20 May 2026 05:29:32 GMT'), ('Content-Length', '0'), ('Content-Type', 'text/plain'), ('Connection', 'close')]), body=bytearray(b''), _exception=InvalidStatus(...)))"
+    },
+    {
+      "path": "ws://192.168.50.167:8000/ws/internal?api_key=intern2-KEVD",
+      "status": "fail",
+      "error": "InvalidStatus(Response(status_code=403, reason_phrase='Forbidden', headers=Headers([('Date', 'Wed, 20 May 2026 05:29:32 GMT'), ('Content-Length', '0'), ('Content-Type', 'text/plain'), ('Connection', 'close')]), body=bytearray(b''), _exception=InvalidStatus(...)))"
+    }
+  ]
+}

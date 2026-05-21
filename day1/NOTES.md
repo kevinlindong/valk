@@ -900,3 +900,620 @@ than the sample-mean projection); symmetric for sell. Applied inside
 scheduler thread starts/stops cleanly, guard blocks the 90→492 sell case
 and the 600→492 buy case (the two leak directions). Run live with:
 `python day1/run_combined8.py` (writes `combined_log_v8_<TS>.jsonl`).
+
+## Strategy v9 — reveal-zone IOC block + K=1 reveal-math + drift cancel (2026-05-19)
+
+**Motivation:** audit of `combined_log_v8_20260519_{204107,204402}.jsonl`
+showed s1 PnL +63, s2 PnL **-292**. The s2 loss is one event: at
+t+16.9 to +17.5s (≈2s AFTER reveal_1=1, K=1, posterior~12, public mid=15)
+we **IOC-bought 21 lots from SEAN at 19→21** for -290 PnL. Counterparty
+blacklisting isn't implementable from the public feed (`quote_add` does
+NOT carry trader id), so the fix has to be price/time-based.
+
+**Files:** `day1/strategy9.py` (subclass of Strategy8, ~370 lines),
+`day1/run_combined9.py` (runner). All round params still from
+`game_state` — nothing hardcoded.
+
+**v9 knob table (deltas vs v8):**
+
+| knob                              | v8    | v9    | rationale                                                    |
+|-----------------------------------|-------|-------|--------------------------------------------------------------|
+| `reveal_math_min_k`               | 2     | **1** | the s2 leak fired at K=1 when v8 had no guard                |
+| `reveal_math_k1_widening`         | —     | 2.0   | single-sample sample-mean noise — widen guard 4→8 at K=1     |
+| `reveal_danger_zone_sec`          | —     | 2.0   | block IOCs in [last_reveal, +2s] AND [next_reveal-2s, …]    |
+| `drift_cancel_ticks`              | —     | 3.0   | cancel-all + restep when fair_eff drifts >3 from quote anchor|
+| `drift_cancel_min_interval`       | —     | 0.5s  | rate-limit drift-cancel to avoid flap                        |
+| `inv_hard_kill_frac`              | 0.85  | **0.4** | s1/s2 drifted long to +13/+15 well below 0.85 threshold    |
+| `opening_clamp_ticks`             | —     | 1     | K=0 only: clamp bid ≤ prior_E_settle+1, ask ≥ prior_E−1      |
+
+**Key v9 helpers:**
+- `_in_reveal_danger_zone()`: True in 2s windows around each reveal.
+  Both `maybe_snipe` and `_try_direct_snipe` short-circuit when True.
+- `_reveal_math_guard_width()`: 4 ticks at K≥2, 8 ticks at K=1.
+- `_maybe_drift_cancel()`: hooked into `on_quote_event` and `on_trade`.
+  Compares current `fair_eff` to `_last_quote_fair_eff` recorded in
+  `desired_quotes()`. >3 tick drift triggers cancel_all + step.
+- Scheduler now emits `[SCHED #N]` tags on every action and uses
+  `cancel_all()` unconditionally even if local resting state says
+  empty. `on_reveal` logs `actual_vs_predicted` lag for forensics.
+
+**Smoke test (`.venv/bin/python`, mocked client):**
+- All knobs visible
+- Danger zone correctly fires 1s after reveal AND 1.5s before next reveal
+- K=1 reveal-math projects rm=6 for reveals=[1] with N=6
+- `_reveal_math_blocks_buy(21.0)` = **True** (the exact s2 leak case
+  would have been blocked)
+- Scheduler thread starts/stops cleanly
+
+Run live: `python day1/run_combined9.py` (writes
+`combined_log_v9_<TS>.jsonl`).
+
+## Strategy v10 — precompute scenarios + fast-path reveal (2026-05-19 late)
+
+**Motivation:** user microstructure directive — pre-calculate, for every
+plausible reveal value, what we'd lift/hit and what bid/ask to quote.
+On reveal, look up the answer — no Bayesian update in the hot path.
+Between reveals, penny BBO when there's edge; pull quotes when there
+isn't. The goal is to be *fastest* around reveals.
+
+**Files:** `day1/strategy10.py` (~510 lines, subclass of Strategy9),
+`day1/run_combined10.py` (runner).
+
+**Architecture:**
+- `PrecomputedScenario` dataclass: snapshot of `(posterior_after, fair,
+  sigma, bid_px, ask_px, lift_to_px, hit_to_px)` for one hypothesized
+  reveal value v.
+- `_precompute_worker` daemon thread: woken via Event. For each value
+  v with marginal `P(X=v) >= precompute_min_prob` (0.5%), computes the
+  scenario. Caps at `precompute_max_values=40`.
+- `on_reveal` fast-path: dict lookup → swap posterior → post precomputed
+  quotes → walk top of book for IOCs inside precomputed bounds. No
+  Bayesian math in hot path. Falls back to v7 path on cache miss.
+- Scheduler tick (inherited from v9) also fires a precompute prefetch
+  `precompute_lead_sec=4` seconds before each predicted reveal.
+- Between-reveal MM: `desired_quotes` pulls both sides when expected
+  edge < `no_edge_pull_ticks=0.5`. Adverse-fill skew widens the side
+  that just got a maker fill (linear decay over 8s).
+- v9 danger zone DISABLED — precompute eliminates the slow-recompute
+  problem it was guarding against. Aggressive post-reveal sweeps are
+  now safe because fair is instantly accurate.
+
+**v10 knob table (new):**
+
+| knob                          | value | rationale                                          |
+|-------------------------------|-------|----------------------------------------------------|
+| `precompute_min_prob`         | 0.005 | covers ~99.5% of mass, O(20-40) scenarios          |
+| `precompute_lead_sec`         | 4.0   | prefetch 4s before reveal — breathing room         |
+| `precompute_max_values`       | 40    | hard cap so high-w branches don't explode work     |
+| `no_edge_pull_ticks`          | 0.5   | half-tick fee + adverse variance dominates EV      |
+| `penny_aggressive`            | True  | step inside BBO whenever per-fill edge stays >=1   |
+| `tight_penny_min_reveals`     | 1     | (was 2) — precomputed fair is trustworthy from K=1 |
+| `adverse_fill_skew_ticks`     | 1.5   | widen hit side after maker fill                    |
+| `adverse_fill_decay_sec`      | 8.0   | linear decay window                                |
+| `reveal_danger_zone_enabled`  | False | (v9 default True) — fast path replaces the guard   |
+
+**Smoke test (`.venv/bin/python`, mocked client):**
+- Initial precompute: 15 scenarios for K=0 in **1.9ms**
+- Top-mass scenarios match prior intuition: v=3 (P=16.8%) → fair=18.2,
+  bid=16, ask=20, lift≤15, hit≥21
+- Fast-path `on_reveal(0)` end-to-end: **5.4ms** (most is book fetch +
+  cancel_all)
+- Worker + scheduler threads start/stop cleanly
+
+Run: `python day1/run_combined10.py` (writes `combined_log_v10_<TS>.jsonl`).
+The 's' command shows precompute count + cycle + last duration; 'p'
+dumps the full precompute table.
+
+## Strategy v10 — low-latency reveal-race hardening (2026-05-19, night)
+
+A series of log-driven infrastructure fixes targeting two concrete pathologies
+visible in `combined_log_v10_2026051922{2449,2654,4229,4419,4557}.jsonl`:
+
+1. **We win 0/20 reveal races.** Competitors' first IOC lands at T+46-78ms;
+   ours at p50 T+94-117ms. We're 30-40ms behind.
+2. **We are the hit-bait.** 92% of reveals saw us *get hit as maker* before
+   our IOC fired. Our pre-reveal MM quotes at T-62ms became free liquidity
+   for competitors racing the reveal.
+
+### Slow / fast / precompute loop architecture (already in v10, confirmed working)
+
+The hot path is now a pure dict lookup → parallel IOC fire:
+
+- **Slow housekeeping loop** (2s tick): periodic position reconcile + sanity
+  checks. No timing-critical work. `_slow_housekeeping_loop` /
+  `_slow_housekeeping_tick`.
+- **Fast scheduler loop** (20ms tick): pre-reveal cancel slot, JIT theo
+  refresh, book pre-warm, precompute prefetch trigger. `_fast_scheduler_loop` /
+  `_fast_scheduler_tick`.
+- **Precompute worker** (event-driven daemon): computes
+  `PrecomputedScenario` (fair, sigma, bid_px, ask_px, lift_to_px, hit_to_px,
+  posterior_snapshot) for every plausible reveal value v.
+- **`on_reveal` fast path** (`strategy10.py:1584-1689`):
+  1. **Dict lookup** — `scenario = self._precomputed.get(int_value)`
+  2. **Local posterior swap** (`with self.lock`, no I/O) — ~50µs
+  3. **Parallel IOC fire** — `_fast_post_reveal_sweep` builds the full
+     buy/sell IOC plan upfront (capping cumulative qty by full headroom so
+     concurrent fires can't exceed position limit), submits all to
+     `self._ioc_executor` (6-worker `ThreadPoolExecutor`), then collects
+     results. 3 sequential IOCs at ~80ms each → ~80ms wall.
+  4. **Post new MM quotes** (after race is won)
+
+Smoke-tested: 6 parallel IOCs across 6 worker threads complete in 82ms wall
+vs ~480ms sequential — clean 6× speedup. `_ioc_executor.shutdown(wait=False)`
+added to `flatten()` for clean teardown.
+
+### Quote blackout (round 1)
+
+**Knob:** `pre_reveal_quote_blackout_sec` — refuse all new MM quote posts /
+modifies inside `[next_reveal − blackout_sec, next_reveal]`. Cancels of
+existing quotes still flow (we want to be flat at reveal).
+
+**Gates added:**
+- `_in_quote_blackout()` helper (`strategy10.py:807`).
+- `_tokens_reserved_for_reveal()` helper (`strategy10.py:819`) — True when
+  in blackout AND `tokens_available() < pre_reveal_token_reserve` (default
+  7 of 20). Available for future use; not currently wired.
+- `_apply_target_quotes` first checks blackout — if active, cancels existing
+  side(s) and returns without posting (`strategy10.py:1136-1144`).
+- `step()` first checks blackout — if active, returns immediately, saving
+  the full reconcile + desired_quotes + REST chain (`strategy10.py:1577-1582`).
+
+**Initial values:** `pre_reveal_cancel_sec=0.6`, `pre_reveal_quote_blackout_sec=0.65`.
+Result (3 new logs): hit-bait dropped 45% (10 → 5 lots/reveal), but **96% of
+surviving hits landed in T-650ms..T-100ms** — the gap between cancel-issue
+(T-600ms) and cancel-ack (~T-450ms). Cancel ack lag is 150-200ms, so quotes
+were on the book during the blackout *because the cancel hadn't acked yet*.
+
+### Quote blackout (round 2 — extend the cancel lead)
+
+To eliminate the surviving 5 lots/reveal:
+
+| knob                              | before | after | rationale                                                  |
+|-----------------------------------|--------|-------|------------------------------------------------------------|
+| `pre_reveal_cancel_sec`           | 0.6    | **0.9** | cancel-ack RTT 150-200ms; T-0.9 cancel acks by T-0.7      |
+| `pre_reveal_quote_blackout_sec`   | 0.65   | **0.95** | stays slightly wider than cancel — gate opens first      |
+| `book_prewarm_lead_sec`           | 1.0    | **0.7** | focus pre-warm on critical window, save tokens earlier    |
+| `book_prewarm_max_age_sec`        | 0.2    | **0.1** | cache ≤100ms stale at T+0 — no synchronous REST fallback  |
+
+With cancel at T-0.9s and ack lag ~200ms, quotes are off the book by T-0.7s.
+Blackout from T-0.95s prevents any new posts. The 700ms window T-0.7..T+0 is
+therefore clean. Cost: ~6% additional MM downtime per 5s cycle (acceptable).
+
+### Other infrastructure shaves
+
+- **Strategy-before-probe ordering in `run_combined10.py:113-122`** — probe's
+  on_reveal does a JSON write + stdout print (~500µs). Originally fired
+  before `strat.on_reveal`, pushing our IOC submit later in the reveal-race
+  window. Now strategy first, probe second.
+- **Book pre-warm hot path** (already in v10): fast scheduler refreshes the
+  book cache from T-0.7s onward; `_fast_post_reveal_sweep` reads the cache
+  if it's ≤100ms old, avoiding a 30-50ms synchronous REST in the IOC sweep.
+- **Parallel IOC executor pre-allocated** at strategy init —
+  `ThreadPoolExecutor(max_workers=6, thread_name_prefix="ioc-fire")`. No
+  thread-spawn cost on the hot path.
+
+### Measurement bottom line
+
+The 30-40ms head-to-head IOC latency gap vs competitors is **not closable**
+by these changes — it's dominated by the requests/urllib3 stack plus network
+RTT. Closing it would require a low-level rewrite (raw sockets or async I/O).
+What these changes DO fix is the *adverse-selection* leak: we stop bleeding
+maker-side fills to competitors who arrive at the reveal moment, even though
+we still don't beat them to the take.
+
+### Knobs reference (v10 latency-hardening)
+
+| knob                                | value | location                |
+|-------------------------------------|-------|-------------------------|
+| `pre_reveal_cancel_sec`             | 0.9   | `strategy10.py:391`     |
+| `pre_reveal_quote_blackout_sec`     | 0.95  | `strategy10.py:408`     |
+| `pre_reveal_token_reserve`          | 7.0   | `strategy10.py:415`     |
+| `book_prewarm_lead_sec`             | 0.7   | `strategy10.py:453`     |
+| `book_prewarm_max_age_sec`          | 0.1   | `strategy10.py:454`     |
+| `ioc_parallel_workers`              | 6     | `strategy10.py:447`     |
+| `_scheduler_tick_sec` (fast loop)   | 0.02  | `strategy10.py:465`     |
+| `slow_housekeeping_interval_sec`    | 2.0   | `strategy10.py` (slow)  |
+| `jit_theo_refresh_sec`              | 0.5   | `strategy10.py` (JIT)   |
+
+### What was tried and didn't help
+
+- **Pre-built `requests.PreparedRequest` payloads** — JSON serialization
+  is ~5µs per call; pre-building saves <1ms total. Not the bottleneck.
+- **Separate `requests.Session` for IOCs** — connection pool already
+  parallelizes 3 calls. Server-side rate limit is per-API-key, so a 2nd
+  session doesn't increase throughput.
+- **Token-bucket reservation gating non-essential REST** — bucket is at
+  capacity (20) entering blackout because no work happened in the prior
+  950ms. IOC burst uses 3-6 tokens; plenty of headroom.
+
+### What's outstanding
+
+- Verify the blackout-round-2 fix on fresh logs (extend cancel + tighter
+  pre-warm). Expected hit-bait drop from 5 lots/reveal toward 0.
+- Recover MM volume lost to wider blackout (currently 19% downtime per
+  5s cycle vs 13% before round 1, vs ~8% before any blackout).
+- Investigate the rare reveal where straggler-count went to 0 (224557, 6
+  reveals, 0 taker fills) — possibly stale precompute or sparse book.
+
+## Strategy v17 — execution polish + orphan drain (2026-05-20)
+
+Dual-symbol (A + B) live game showed three classes of issue in
+`combined_log_v17_*.jsonl` and stdout: (1) zero reveal-IOC taker fills
+despite precompute infrastructure, (2) `HTTPError: 400`/`403` repeating on
+the same orders, and (3) orphan accumulation outrunning the reconcile
+drain rate. Fix bundle landed in `strategy17.py` + `probe.py`.
+
+### Reveal-IOC latency exploit (post path → IOC-first path)
+
+Logs showed `precompute` table built fine but no `IOC` events on reveals.
+`on_reveal(v)` was only POSTing fresh passive at the new fair — never
+*lifting* laggard book orders. Added `_ioc_sweep_on_reveal(sym, fair)`
+that runs BEFORE `_apply_quote`:
+
+- Snaps `state[sym].book` and iterates levels.
+- Asks below `fair - ioc_on_reveal_edge_ticks` get a buy IOC.
+- Bids above `fair + ioc_on_reveal_edge_ticks` get a sell IOC.
+- Bounded by `ioc_on_reveal_max_slice=10` per side, padded by
+  `ioc_on_reveal_position_pad=5` so a sweep doesn't push past the
+  position limit.
+- All math runs at precompute time, hot path is dict lookup + book
+  comparison only.
+
+### Wide-quoter trap defense (`max_ioc_distance_ticks=50`)
+
+Several adversaries quote at extreme prices (ask@5 with fair=50,
+bid@5000 with fair=50) to bait IOC sweepers. Added a distance filter
+in `_ioc` AND `_ioc_sweep_on_reveal`: refuse any IOC where
+`abs(price - fair) > max_ioc_distance_ticks`. Defends arb path,
+stale-sweep, and reveal-IOC alike. Logged once per block when
+`log_every_modify=True`.
+
+### Park-not-cancel during pre-reveal pull (modify-replace recovery)
+
+`combined_log_v17_20260520_145320.jsonl`: 785 posts, 692 cancels,
+**0 modifies**. Median order lifetime 2.8s ≈ one MM cycle. Root cause:
+`_passive_quote` returned `(None, None)` during the 2.5s pre-reveal
+pull window → `_apply_side` cancelled primary → next post-reveal MM
+cycle posted FRESH (no primary to modify) → modify path was dead code.
+
+Fix: `pre_reveal_use_park=True` returns `(fair - 30t, fair + 30t)`
+during the pull window. Order parks at extreme price (no fills there
+under normal markets), survives the pull window, gets *modified* back
+into the market on the next MM cycle = 1 REST call instead of 2.
+
+Knob: `pre_reveal_park_offset_ticks=30`. Inventory pad respected
+(park bid pulled when `position >= +position_limit - pad`, ask pulled
+symmetrically).
+
+### Negative-price floor (B fair ~10 + park offset 30t = -20)
+
+`HTTPError: 400` storm on B bid posts at negative prices. Two paths:
+- `_passive_quote`: park branch floors `park_bid < tick → None`.
+- `_apply_side`: defense-in-depth guard `if target_px < state[sym].tick: return`.
+
+### 400 / 403 terminal-error categorization
+
+Previously a 400 from `modify` or `cancel` was treated as transient —
+strategy kept retrying the same oid each cycle → log spam + wasted
+tokens. Three classes now treated as terminal (drop tracking, don't
+retry):
+- `404 / not found / no such / gone` (server doesn't have it)
+- `400 / bad request` (terminal-state order, e.g. already cancelled/filled)
+- `403 / forbidden` (account-state / cash-margin issue)
+
+### Per-(sym,side) post backoff (`post_backoff_sec=5.0`)
+
+When a fresh POST returns 400 or 403, arm a 5s backoff for that
+`(sym, side)` pair so the next MM cycle doesn't burn a token on a
+guaranteed-reject. Log ONCE per backoff window. Cleared on the next
+successful post on that side.
+
+### Nested-oid extraction on post
+
+Server's POST response shape is inconsistent: sometimes
+`{"order_id": N, ...}` (flat, like the dashboard), sometimes
+`{"order": {"order_id": N}, "trades": [...]}` (nested, same shape as
+modify). Old code only checked top-level — if the response was nested,
+`oid` was None, the order was NEVER tracked locally, and reconcile saw
+it as an orphan on the next tick. Fixed:
+
+```python
+res_obj = res or {}
+nested = res_obj.get("order") or {}
+oid = (res_obj.get("order_id") or res_obj.get("id")
+       or nested.get("order_id") or nested.get("id"))
+```
+
+If still None, log under `log_every_modify=True` with the full `res_obj`
+for inspection.
+
+### Reconcile drain rate + bulk cancel_all fallback
+
+`combined_log_v17_20260520_200715.jsonl` log showed orphan accumulation:
+`(capped at 5/11) → 5/13 → 5/14 → 5/15`. Drain rate (1 orphan/sec at
+cap=5/tick × 1/5s) was losing to creation rate (~1.3 orphans/sec).
+
+Tuned:
+- `reconcile_check_sec`: 5.0 → 3.0
+- `reconcile_max_cancels_per_tick`: 5 → 8 (drain ≈ 2.7 orphans/sec)
+- New `reconcile_bulk_cancel_threshold=20`: when orphans on a single
+  symbol exceed threshold, fire `client.cancel_all(symbol=sym)` (1 REST
+  call) and wipe local tracker — MM cycle re-quotes from clean slate.
+
+### MM throttle (`mm_min_interval_sec=0.5`)
+
+Fill bursts on B (which fills frequently) wake the MM thread many times
+per second, each refresh costing ≥ 1 REST call. Added a 500ms minimum
+between `_refresh_mm_quotes` invocations. Reduces wasted modifies when
+the book hasn't actually moved.
+
+### Reconcile-log collapse + tick_settlement / strikes silence
+
+`probe.on_message` previously printed `RAW unknown type='tick_settlement'`
+and `'strikes'` per event (multiple per reveal). Added both to
+`documented_untyped` set — still logged to JSONL under actual type, no
+terminal print.
+
+`_reconcile_once` previously printed one line per cancelled orphan.
+Collapsed into one summary line per tick:
+`[v17 RECON:A] cancelled N orphan(s) (capped at K/total)`.
+
+### Knobs reference (v17 execution polish)
+
+| knob                                | value | location                |
+|-------------------------------------|-------|-------------------------|
+| `ioc_on_reveal_enabled`             | True  | `strategy17.py` config  |
+| `ioc_on_reveal_edge_ticks`          | 2.0   | `strategy17.py` config  |
+| `ioc_on_reveal_max_slice`           | 10    | `strategy17.py` config  |
+| `ioc_on_reveal_position_pad`        | 5     | `strategy17.py` config  |
+| `max_ioc_distance_ticks`            | 50.0  | `strategy17.py` config  |
+| `pre_reveal_use_park`               | True  | `strategy17.py` config  |
+| `pre_reveal_park_offset_ticks`      | 30    | `strategy17.py` config  |
+| `post_backoff_sec`                  | 5.0   | `strategy17.py` config  |
+| `mm_min_interval_sec`               | 0.5   | `strategy17.py` config  |
+| `reconcile_check_sec`               | 3.0   | `strategy17.py` config  |
+| `reconcile_max_cancels_per_tick`    | 8     | `strategy17.py` config  |
+| `reconcile_bulk_cancel_threshold`   | 20    | `strategy17.py` config  |
+
+### What's outstanding (v17)
+
+- Validate by grepping next `combined_log_v17_*.jsonl` for
+  `[v17 REVEAL-IOC:` lines (sweep firing) and shrinking RECON cap
+  patterns. `BULK cancel_all fired` log indicates the circuit breaker
+  tripped — investigate whether root cause is back.
+- 403 backoff treats symptoms, not cause. Real driver was likely cash
+  exhaustion from B `tick_settlement` losses depleting account margin —
+  separate problem.
+- `tick_settlement` events stream per reveal on B with PnL delta data —
+  could feed into strategy cash awareness to avoid posting when margin
+  is tight (currently silent).
+
+## Strategy v18 — SEAN-style MM + private-feed exploit + BBO claim (2026-05-20)
+
+`strategy18/` is a clean re-package of the v17 polish + several new
+edges. Same `Posterior` core, same dual-symbol MM mirroring SEAN bot
+widths (A: 8t / size 5 / flip 50, B: 4t / size 5 / flip 100), but the
+hot path, reactive logic, and infra robustness are all rewritten. Run
+with `python day1/strategy18/run_combined18.py`. Probe is a passive
+wrapper (`probe18.py`) so the strategy owns all order placement.
+
+### Precompute split: slow (Bayesian) + fast (live thresholds)
+
+- **Slow loop** (`_precompute_loop`) — builds the per-scenario table
+  for the NEXT reveal: Bayesian posterior update over every plausible
+  X, fair/sigma per branch, base sweep thresholds (lift_to / hit_to).
+  Heavy work, posterior-driven, runs on reveal + on `_precompute_request`
+  signal.
+- **Fast loop** (`_fast_precompute_loop`, `_build_live_thresholds`) —
+  keeps the CURRENT-state live snipe thresholds fresh. Re-derives every
+  `fast_precompute_tick_sec=0.05s` from cached fair_a/fair_b + current
+  position + flatten-bias window. Cost ~50µs/tick (cached posterior
+  generation = lookup, not recompute). Consumed by `_maybe_inter_sweep`
+  and `_try_cross_arb` so they don't re-derive fair on every book event.
+  See `_LiveThresholds` dataclass for the snapshot shape — includes
+  both normal `lift_to/hit_to` and flatten-relaxed `lift_to_flat/hit_to_flat`.
+
+### Public-feed 15ms lag exploit
+
+Documented constraint of the day1 exchange: the public WS feed lags the
+private feed by ~15ms. Private: reveals, our fills, our acks/rejects.
+Public: book updates, others' quote_add/cancel, trade prints. On every
+private event we have ~12-15ms of exclusive information.
+
+`_try_cross_arb(source)` fires from two private hooks:
+
+- **Fill hook** (`on_fill_event`): after the position update but before
+  any defensive cancel. Walks BOTH books at FRESH fair, lifts/hits
+  anything past `cross_arb_edge_ticks=2.0t`. Counterparties are still
+  pricing off pre-fill book.
+- **Reveal hook** (`on_reveal`): after the per-symbol post-reveal
+  sweep. Same scan, again against the new posterior.
+
+Walks `cross_arb_levels=5` deep, max `cross_arb_max_slice=8` per
+level. Bypasses `inter_sweep_throttle` (this is a private-event hook,
+not a book-flap reaction) but still honors `_in_lockout`,
+`_can_send_now`, `max_ioc_distance_ticks`, and the inventory pad.
+
+### Cross-symbol arb (math)
+
+A settles at `running_sum + Σ remaining X`; B settles at the NEXT X.
+So `implied_X_from_A = (mid_A - running_sum) / n_rem` should equal
+`implied_X_from_B = mid_B` in equilibrium. Any divergence is arb.
+`_try_cross_arb` walks both symbol books and lifts/hits anything past
+the edge. Tagged `[v18 ARB(fill):...]` / `[v18 ARB(reveal):...]` in
+logs.
+
+### Endgame burst mode
+
+After the LAST reveal, A's settlement = `running_sum_final` is KNOWN
+exactly — posterior collapses, all uncertainty is gone. `_endgame_active`
+flips → MM stops refreshing A (its resting quotes get cancelled — they'd
+be picked off by other snipers), and `_endgame_loop` ticks every
+`endgame_tick_sec=0.04s` (25Hz).
+
+Each tick walks `endgame_max_levels=20` into both sides of A's book.
+Asks below `running_sum - endgame_edge_ticks_a=0.5t` get a buy IOC;
+bids above settlement + 0.5t get a sell IOC. Slice size up to
+`endgame_max_slice=25`. Reserves `endgame_min_tokens=3.0` of REST bucket
+so the burst doesn't trip the server's 20/s lockout. Tagged
+`[v18 ENDGAME:A] ...`.
+
+### Connection pre-warm
+
+Idle TCP can be reset by NAT or server. `_prewarm_loop` (separate
+thread) sends a cheap `my_orders` GET every `prewarm_interval_sec=25s`
+to keep the Session pool warm. Also fires a burst pre-warm
+`prewarm_before_reveal_sec=1.0s` BEFORE each reveal — confirms the pool
+is live so the reveal IOC fan-out doesn't pay a TCP handshake.
+
+### Flatten-bias before high-uncertainty events
+
+Pre-first-reveal: the posterior IS the raw prior, sigma_A is huge. An
+outlier reveal can blow PnL on any sized inventory. In the window
+`pre_first_reveal_flatten_sec=8.0s` before the first reveal (or any
+reveal where `sigma_a >= flatten_bias_sigma_a_min=12.0`), bias snipes
+toward `|position|` reduction:
+
+- `lift_to_flat` raised when SHORT (cover at slightly worse asks).
+- `hit_to_flat` lowered when LONG (dump at slightly worse bids).
+- Edge reduction `flatten_edge_reduction_ticks=1.5t`, floored at
+  `flatten_min_edge_ticks=0.6t` so we still beat the 0.5/lot taker fee.
+- Never forced — only fires if a position-reducing trade still has
+  positive expected value at the relaxed edge.
+
+`_in_flatten_bias_window` is consumed by both inter_sweep and
+cross_arb. Tagged `[v18 INTER-FLAT:...]` / `[v18 ARB(...)-FLAT:...]`.
+
+### BBO claim — dime defense + absent + outside (book-event driven)
+
+The MM refresh loop has `mm_min_interval_sec=0.4s` throttle, so for up
+to 0.4s after any book change we sit at our default width, potentially
+outside the inside BBO. `_maybe_dime_defense` (called from
+`on_book_event`) handles three cases per side, on every book event:
+
+- **Dimed** — we have resting, competitor stepped strictly inside us.
+- **Absent** — no resting on this side (post-fill gap before next MM
+  refresh). Claim BBO immediately.
+- **Outside** — we have resting but the inside has tightened past us
+  without an explicit dime.
+
+For each case, target = `best ± 1 tick`, gated by:
+- `target ≤ fair - penny_min_edge_*` (preserves maker profit after fees).
+- Don't cross opposite side.
+- `(step distance) ≤ penny_max_step_ticks=5` (caps how far a one-side
+  collapse can drag us).
+
+Throttle: `dime_defense_throttle_sec=0.15s` per symbol, only burned
+when we actually requote. Tagged `[v18 BBO:sym/side dimed]` or
+`[v18 BBO:sym/side absent]`.
+
+### 403 robustness — central handler, phase recheck, circuit breaker
+
+v17 used per-`(sym, side)` 5s backoff for 403s, which meant after game
+end we'd loop forever: 403 → 5s backoff → retry → 403. Spammed stdout
+with `[v17 POST:A/ask@50] HTTPError: 403 Client Error: Forbidden ...
+→ backoff 5.0s` lines.
+
+v18 centralizes 403 handling through `_handle_forbidden(ctx, sym, side,
+target_px, e)`. Three things:
+
+1. **Extract response body** via `_http_status_and_body(e)` — old log
+   only had the URL and status. Now: `[v18 FORBIDDEN:POST:A/ask@50]
+   status=403 body='{"detail":"trading_closed"}'` so the actual server
+   reason is visible.
+2. **Authoritative phase re-check** — on each 403, fire `c.game_state()`
+   (throttled `forbidden_phase_recheck_throttle_sec=0.5s`) to ask the
+   server. If server says NOT running but our local `self.phase` lagged,
+   set `_post_terminal_blocked=True` immediately. Self-corrects in ≤1
+   REST RTT instead of looping on backoff.
+3. **Circuit breaker** — if `forbidden_circuit_max=3` 403s in
+   `forbidden_circuit_window_sec=10.0s`, hard-block sends even if phase
+   looks fine. Covers persistent reject causes (auth issue, position-limit
+   edge case, server policy).
+
+All cleared on phase→running. Single `_post_terminal_blocked` flag
+gates POST/MODIFY/IOC via `_can_post()`; cancels still work so flatten
+cleanup runs across phase transitions.
+
+### Where `_can_post()` is wired
+
+Replaced raw `self.phase != "running"` checks in:
+
+- `_apply_side` (POST + MODIFY fast paths).
+- `_ioc` (taker snipes).
+- `_refresh_mm_quotes`, `_park_tick`.
+- `_maybe_inter_sweep`, `_try_cross_arb`, `_maybe_dime_defense`.
+- `_emergency_flatten_if_needed` (gates the IOC; cancel_all still runs).
+
+### Reconcile noise gate (`reconcile_print_min=3`)
+
+Routine cleanup of 1-2 orphans per tick is expected (POST ack vs
+local-dict update race). Log only when `total ≥ reconcile_print_min`
+or when cancels get capped at `reconcile_max_cancels_per_tick=8`
+(real leak indicator). Eliminates the
+`[v18 RECON:A] cancelled 1 orphan(s)` spam.
+
+### Knobs reference (v18 additions)
+
+| knob                                  | value | location                |
+|---------------------------------------|-------|-------------------------|
+| `cross_arb_enabled`                   | True  | `strategy18.py` Config  |
+| `cross_arb_edge_ticks`                | 2.0   | `strategy18.py` Config  |
+| `cross_arb_levels`                    | 5     | `strategy18.py` Config  |
+| `cross_arb_max_slice`                 | 8     | `strategy18.py` Config  |
+| `public_feed_lag_ms`                  | 15.0  | `strategy18.py` Config  |
+| `endgame_enabled`                     | True  | `strategy18.py` Config  |
+| `endgame_tick_sec`                    | 0.04  | `strategy18.py` Config  |
+| `endgame_edge_ticks_a`                | 0.5   | `strategy18.py` Config  |
+| `endgame_max_levels`                  | 20    | `strategy18.py` Config  |
+| `endgame_max_slice`                   | 25    | `strategy18.py` Config  |
+| `prewarm_enabled`                     | True  | `strategy18.py` Config  |
+| `prewarm_interval_sec`                | 25.0  | `strategy18.py` Config  |
+| `prewarm_before_reveal_sec`           | 1.0   | `strategy18.py` Config  |
+| `flatten_bias_enabled`                | True  | `strategy18.py` Config  |
+| `pre_first_reveal_flatten_sec`        | 8.0   | `strategy18.py` Config  |
+| `flatten_bias_sigma_a_min`            | 12.0  | `strategy18.py` Config  |
+| `flatten_edge_reduction_ticks`        | 1.5   | `strategy18.py` Config  |
+| `flatten_min_edge_ticks`              | 0.6   | `strategy18.py` Config  |
+| `fast_precompute_tick_sec`            | 0.05  | `strategy18.py` Config  |
+| `dime_defense_enabled`                | True  | `strategy18.py` Config  |
+| `dime_defense_throttle_sec`           | 0.15  | `strategy18.py` Config  |
+| `forbidden_circuit_max`               | 3     | `strategy18.py` Config  |
+| `forbidden_circuit_window_sec`        | 10.0  | `strategy18.py` Config  |
+| `forbidden_phase_recheck_throttle_sec`| 0.5   | `strategy18.py` Config  |
+| `reconcile_print_min`                 | 3     | `strategy18.py` Config  |
+| `ioc_parallel_workers`                | 10    | `strategy18.py` Config  |
+
+### Bot-by-bot exploit map (`bot_config_dump.json` + v18 paths)
+
+| Bot   | Class              | v18 exploit |
+|-------|--------------------|-------------|
+| VALKA | naive_mm w20/r1s   | inter_sweep + post-reveal sweep on default-mean stale quotes |
+| VALKO | stale_quoter r5s s25 e2-6t | **biggest target.** Post-reveal IOC at 1.5t edge fires before VALKO re-quotes. inter_sweep_min_size=4 matches. |
+| VALKF/L/H | predictive/bayes/inventory mm | penny inside; inter_sweep on >3t drift |
+| VALKD/KVALK | dimer s1-3 | `_maybe_dime_defense` reclaims BBO ≤0.15s |
+| VALKC/CVALK | informed_sniper(_next), lead 1-1.5s | we park at T-0.8s → they lift air |
+| VALKE/M/J | mixed/bayes/slow informed taker | inter_sweep + dime defense reprice instantly after their fires |
+| VALKN | pull_event 0.7p 5s | max_ioc_distance filter blocks the bait quote |
+| HVALK | spoofer linger 300ms | inter_sweep_throttle=0.3s > linger → don't react to post-then-pull |
+| GVALK | informed_twapper 3-slice | 15ms cross-arb window between their slices |
+| IVALK | true_mean_taker | flatten-bias reduces exposure when sigma_b high |
+| SEAN  | identical widths + skew | beat via 0.2s earlier park, 15ms cross-arb, dime defense, endgame burst |
+
+### What's outstanding (v18)
+
+- Validate by running a full round and grepping
+  `combined_log_v18_*.jsonl` for `[v18 BBO:` (claim firing),
+  `[v18 ARB(fill)` / `[v18 ARB(reveal)` (cross-arb hits),
+  `[v18 ENDGAME:A]` (burst firing), `[v18 FORBIDDEN:` (403 reasons),
+  `[v18 INTER-FLAT:` (flatten-bias firing). Absence of `[v18 POST:...
+  HTTPError: 403 ... backoff 5.0s` confirms 403 cleanup.
+- Spoofer fade — currently we just filter HVALK via
+  max_ioc_distance_ticks. Could *take the opposite side* when the
+  bait appears (followthrough_prob=0.5 implies 50% chance of price
+  moving away from the spoof).
+- VALKN blackout exploit — during the 5s pull window someone could
+  ladder bids deep to catch the rebound. Currently we just stay out.
+- Consider lowering `penny_min_edge_*` from 1.0t to 0.6t (matches
+  flatten_min_edge_ticks) for tighter MM presence — would require
+  validation that maker fee + adverse selection still nets positive.

@@ -122,7 +122,7 @@ INFORMED_TRADER_ID: Optional[str] = ""
 # Posterior over (a, w)
 # ---------------------------------------------------------------------------
 A_LOGN_MU, A_LOGN_SIGMA = 1.0, 0.8   # a = floor(LogN(mu, sigma))
-W_LOGN_MU, W_LOGN_SIGMA = 0.5, 0.7   # w = 1 + floor(LogN(mu, sigma))
+W_LOGN_MU, W_LOGN_SIGMA = 1.7, 0.9   # w = 1 + floor(LogN(mu, sigma))
 N_PRIOR_SIM = 1_000_000              # MC samples to build the discrete prior
 
 
