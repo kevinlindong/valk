@@ -35,8 +35,8 @@ _THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 if _THIS_DIR not in sys.path:
     sys.path.insert(0, _THIS_DIR)
 
-from sdk_client import GameClient  # noqa: E402
 from strategy20 import (  # noqa: E402
+    GameClient,
     URL, API_KEY, N_PRIOR_SIM, Posterior, Strategy, Config,
 )
 from probe20 import make_probe20, default_log_path  # noqa: E402
@@ -145,6 +145,8 @@ def main() -> None:
         t = msg.get("type")
         if t in ("quote_add", "quote_cancel"):
             strat.on_quote_event(msg)
+        elif t == "strikes":
+            strat.on_strikes_event(msg)
 
     def on_reject(msg: dict) -> None:
         # Strategy first: records lockout cutoff that gates subsequent sends.

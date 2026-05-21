@@ -1,7 +1,7 @@
 """Run Strategy v21 + Probe over a single WS connection.
 
-v21 keeps all of v20's MM / dime / hit-and-retreat / shadow-dime /
-bounds-arb / identity-table / tape / inventory-shift / soft-cap-ramp /
+v21 keeps all of v20's MM / dime / hit-and-retreat / bounds-arb /
+identity-table / tape / inventory-shift / soft-cap-ramp /
 parallel-reveal-sweep / cross-arb / scalp-out logic, but replaces the
 admin truth oracle (`/api/admin/truth`) with `BotIntelligence`: a
 fill-driven inferrer that watches our fills against the advantaged
@@ -39,7 +39,7 @@ for _p in (_THIS_DIR, _V20_DIR):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
-from sdk_client import GameClient  # noqa: E402
+from strategy20 import GameClient  # noqa: E402
 from strategy21 import (  # noqa: E402
     URL, API_KEY, N_PRIOR_SIM, Posterior, Strategy, Config,
 )
@@ -149,6 +149,8 @@ def main() -> None:
         t = msg.get("type")
         if t in ("quote_add", "quote_cancel"):
             strat.on_quote_event(msg)
+        elif t == "strikes":
+            strat.on_strikes_event(msg)
 
     def on_reject(msg: dict) -> None:
         # Strategy first: records lockout cutoff that gates subsequent sends.
@@ -249,6 +251,8 @@ def main() -> None:
                 print(f"  bot-intel: {strat.truth_status_str()}")
                 st = strat.bot_intel.stats()
                 print(f"  fills_ingested={st['fills_ingested']}  "
+                      f"interactions={st['interactions']}  "
+                      f"counterparties={st['counterparties']}  "
                       f"unknown_cp={st['unknown_cp_fills']}  "
                       f"last_err={st['last_err']!r}")
                 for sym in ("A", "B", "C", "D"):
@@ -257,6 +261,34 @@ def main() -> None:
                           f"  upper={b['upper']} ({b['upper_src']})"
                           f"  fills: oracle={b['oracle_fills']} "
                           f"informed={b['informed_fills']}")
+                if st["adverse"]:
+                    adv_lines = ", ".join(f"{k}={v:.2f}s"
+                                          for k, v in sorted(
+                                              st["adverse"].items()))
+                    print(f"  adverse (widening): {adv_lines}")
+                else:
+                    print("  adverse (widening): none")
+                rows = strat.bot_intel.cp_summary(
+                    window_sec=float(getattr(
+                        strat.cfg, "informed_pressure_window_sec", 8.0)) * 8.0,
+                    limit=12,
+                )
+                if rows:
+                    print(f"  top counterparties (last "
+                          f"{8 * float(getattr(strat.cfg, 'informed_pressure_window_sec', 8.0)):.0f}s):")
+                    now = time.time()
+                    for r in rows:
+                        tag = ("ORACLE" if r["is_oracle"]
+                               else ("INF" if r["is_informed"] else "·"))
+                        syms = "".join(sorted(r["syms"]))
+                        age = now - r["last_t"]
+                        print(f"    {r['cp']:<10s} {tag:<6s} "
+                              f"{(r['cls'] or '?'):<22s}  "
+                              f"syms={syms:<4s} n={r['n']:>3d}  "
+                              f"signed_qty={r['signed_qty']:+d}  "
+                              f"last={age:.1f}s ago")
+                else:
+                    print("  (no fills yet)")
                 if hasattr(strat, "_fair_c_truth"):
                     print(f"  fair_c_inferred={strat._fair_c_truth}  "
                           f"fair_d_inferred={strat._fair_d_truth}")

@@ -48,6 +48,14 @@ export function App() {
   >(null);
   // Tracks the last seen phase so we can detect new-game starts.
   const prevPhaseRef = useRef<string | null>(null);
+  // Bumped on every WS event that mutates positions/orders/fills. Used to
+  // detect races between in-flight REST refreshes and WS events: if the seq
+  // changes during a refresh, we skip overwriting positions/orders to avoid
+  // clobbering newer WS state with an older REST snapshot.
+  const wsSeqRef = useRef(0);
+  const bumpWsSeq = () => {
+    wsSeqRef.current += 1;
+  };
   const computeElapsedMs = (): number | null => {
     const a = gameAnchorRef.current;
     if (a == null) return null;
@@ -92,21 +100,28 @@ export function App() {
         g?.instruments && Object.keys(g.instruments).length > 0
           ? Object.keys(g.instruments).sort()
           : DEFAULT_SYMBOLS;
+      const seqAtStart = wsSeqRef.current;
       const [p, oAll, ...bookRes] = await Promise.all([
         api.positions(),
         api.myOrders(),
         ...syms.map((s) => api.book(s, DEPTH)),
       ]);
-      setPositions(p.positions || {});
-      const oMap: Record<number, Order> = {};
-      for (const o of oAll.orders || []) oMap[o.order_id] = o;
-      setOrders(oMap);
+      // Books are pure server state — always safe to overwrite.
       const bMap: Record<string, Book> = {};
       for (let i = 0; i < syms.length; i++) {
         const b = bookRes[i] as any;
         bMap[syms[i]] = { bids: b.bids || [], asks: b.asks || [] };
       }
       setBooks(bMap);
+      // Positions & orders are mutated by WS events too — only overwrite if
+      // no WS event fired during the fetch, otherwise we'd clobber a newer
+      // fill/ack with an older REST snapshot.
+      if (wsSeqRef.current === seqAtStart) {
+        setPositions(p.positions || {});
+        const oMap: Record<number, Order> = {};
+        for (const o of oAll.orders || []) oMap[o.order_id] = o;
+        setOrders(oMap);
+      }
     } catch (e: any) {
       toast("error", `refresh: ${e.message}`);
     }
@@ -115,7 +130,14 @@ export function App() {
   useEffect(() => {
     refreshAll();
     const conn = connectWS(onMessage, setWs);
-    return () => conn.close();
+    // Safety-net refresh: WS can miss messages on reconnect, so periodically
+    // re-sync books (always) and positions/orders (race-guarded inside
+    // refreshAll). Keeps C/D books, my orders and PnL fresh during a round.
+    const id = setInterval(refreshAll, 2000);
+    return () => {
+      clearInterval(id);
+      conn.close();
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -123,15 +145,14 @@ export function App() {
     const t = m.type;
     if (t === "book") {
       const sym = m.symbol;
-      if (sym === "A" || sym === "B") {
-        setBooks((b) => ({
-          ...b,
-          [sym]: { bids: m.bids || [], asks: m.asks || [] },
-        }));
-      }
+      setBooks((b) => ({
+        ...b,
+        [sym]: { bids: m.bids || [], asks: m.asks || [] },
+      }));
       return;
     }
     if (t === "fill") {
+      bumpWsSeq();
       const notional = m.price * m.qty;
       const sign = m.side === "sell" ? 1 : -1;
       // Server cash is signed notional only (NO fee subtraction). Fees are
@@ -177,6 +198,7 @@ export function App() {
       return;
     }
     if (t === "order_ack") {
+      bumpWsSeq();
       setOrders((o) => ({
         ...o,
         [m.order_id]: {
@@ -193,6 +215,7 @@ export function App() {
       return;
     }
     if (t === "cancel_ack") {
+      bumpWsSeq();
       setOrders((o) => {
         const n = { ...o };
         delete n[m.order_id];
@@ -201,6 +224,7 @@ export function App() {
       return;
     }
     if (t === "modify_ack") {
+      bumpWsSeq();
       setOrders((o) => {
         const cur = o[m.order_id];
         if (!cur) return o;
@@ -234,6 +258,7 @@ export function App() {
       return;
     }
     if (t === "tick_settlement") {
+      bumpWsSeq();
       // m.credit is already multiplier-applied (= pos_before * value * mult).
       // Store it as raw PnL contribution so the final formula does NOT
       // re-multiply by `mult`.
@@ -253,14 +278,15 @@ export function App() {
       return;
     }
     if (t === "settlement") {
+      bumpWsSeq();
       setPositions(m.positions || {});
       // Capture true prices so per-trade True PnL can be revealed in the
       // Executed Orders table after the round ends.
       if (m.prices) setTruePrices(m.prices);
       // Reset per-round PnL state so the UI tracks the NEXT round, not cumulative.
-      setTradeCash({ A: 0, B: 0 });
-      setTickPnl({ A: 0, B: 0 });
-      setFeesBySym({ A: 0, B: 0 });
+      setTradeCash({});
+      setTickPnl({});
+      setFeesBySym({});
       gameAnchorRef.current = null;
       toast(
         "info",

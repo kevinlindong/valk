@@ -24,8 +24,8 @@ for _p in (_THIS_DIR, _V20_DIR):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
-from sdk_client import GameClient  # noqa: E402
-from probe_base import Probe  # noqa: E402
+from strategy20 import GameClient  # noqa: E402
+from probe20 import Probe  # noqa: E402
 
 __all__ = ["Probe", "make_probe21", "default_log_path"]
 

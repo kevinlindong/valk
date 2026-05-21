@@ -7,9 +7,9 @@ v21 *infers* truth from observing fills against the advantaged
 ("informed") bots configured in `day1/bot_config_dump.json`.
 
 Everything else — width/skew MM, dime defense, hit-and-retreat,
-shadow-dime, bounds-arb, identity table, tape-driven dime/widen,
-inventory shift, soft-cap ramp, parallel reveal sweep, cross-arb,
-scalp-out at cap, lockout/orphan handling — is inherited from
+bounds-arb, identity table, tape-driven dime/widen, inventory
+shift, soft-cap ramp, parallel reveal sweep, cross-arb, scalp-out
+at cap, lockout/orphan handling — is inherited from
 `strategy20.Strategy` unchanged.
 
 Mechanism:
@@ -59,11 +59,9 @@ for _p in (_THIS_DIR, _V20_DIR):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
-from sdk_client import GameClient  # noqa: E402
-from strategy12 import (  # noqa: E402, F401
+from strategy20 import (  # noqa: E402, F401
+    GameClient,
     URL, API_KEY, N_PRIOR_SIM, Posterior,
-)
-from strategy20 import (  # noqa: E402
     Config as ConfigV20,
     Strategy as StrategyV20,
 )
@@ -135,6 +133,20 @@ class _SymBound:
         return None
 
 
+@dataclass
+class _BotInteraction:
+    """One of our fills, snapshotted for per-counterparty bookkeeping."""
+    t: float
+    sym: str
+    our_side: str            # "buy" or "sell"
+    price: float
+    qty: int
+    cp: str
+    cp_class: str
+    is_oracle: bool
+    is_informed: bool
+
+
 class BotIntelligence:
     """Drop-in replacement for `strategy19.TruthOracle`.
 
@@ -190,6 +202,30 @@ class BotIntelligence:
         # from the strategy on init; without it we can't translate a
         # price > 50 into "C=100" with confidence.
         self.c_strike: Optional[int] = c_strike
+        # Total reveals this round (used by `_fair_c_prior` to compute
+        # the Normal-approx fair_c around the strike for both the
+        # informed-fill C-collapse breakpoint and the soft prior on A).
+        self.n_total: Optional[int] = None
+        # Empirical prior on E[X_i]: the day-1 design uses
+        # X_i ~ Uniform{a, ..., a+w} with the lognormal hyperprior in
+        # `strategy12.Posterior` giving E[X_i] ≈ 7. Matches v20's
+        # `fair_c` Normal-approx so the breakpoint stays consistent.
+        self._x_prior_mean: float = 7.0
+        self._x_prior_var: float = 16.0
+
+        # Per-counterparty interaction log (every one of our fills).
+        # Bounded so a chatty round can't grow it unboundedly.
+        self._interactions: List[_BotInteraction] = []
+        self._interactions_by_cp: Dict[str, List[_BotInteraction]] = {}
+        self._interactions_cap: int = 2048
+        # (sym, our_side) → wall-clock until which we treat that side
+        # as "just got picked off by an informed bot". Set by
+        # `update_from_fill` when counterparty is informed; read by
+        # `is_adverse(...)` and the strategy's `_width_for` override.
+        self._adverse_until: Dict[Tuple[str, str], float] = {}
+        # How long an adverse mark lasts. Strategy injects its config
+        # value via `set_widen_duration`.
+        self._widen_duration_sec: float = 4.0
 
         # Diagnostics.
         self._fill_count: int = 0
@@ -283,6 +319,74 @@ class BotIntelligence:
             self._reveal_max = None
             self._fill_count = 0
             self._unknown_cp_count = 0
+            self._interactions.clear()
+            self._interactions_by_cp.clear()
+            self._adverse_until.clear()
+
+    def set_widen_duration(self, seconds: float) -> None:
+        """Strategy hook: how long (s) an adverse mark stays active.
+        Re-applies to subsequent fills only; existing marks keep their
+        original expiry."""
+        with self._lock:
+            self._widen_duration_sec = max(0.0, float(seconds))
+
+    def set_round_params(self, n_total: Optional[int],
+                         x_prior_mean: float = 7.0,
+                         x_prior_var: float = 16.0) -> None:
+        """Strategy hook: total reveals this round + prior on E[X_i],
+        used by the strike-aware C-collapse breakpoint and the soft
+        prior on A. Call from `Strategy.__init__` and `on_phase_change`."""
+        with self._lock:
+            self.n_total = int(n_total) if n_total is not None else None
+            self._x_prior_mean = float(x_prior_mean)
+            self._x_prior_var = float(x_prior_var)
+
+    def _n_remaining(self) -> int:
+        if self.n_total is None:
+            return 0
+        return max(0, int(self.n_total) - int(self._reveals_seen))
+
+    def _fair_c_prior(self) -> Optional[float]:
+        """Strike-aware prior fair value of C ∈ [0, 100] from the
+        Normal approximation P(sum >= K | running_sum, n_remaining).
+
+        Mirrors v20's `fair_c` Normal-approx so the BotIntelligence
+        C-collapse breakpoint sits at the same fair the rest of the
+        strategy is pricing C against. Returns None if c_strike or
+        n_total is unset (caller should fall back to 50.0)."""
+        K = self.c_strike
+        if K is None:
+            return None
+        n_rem = self._n_remaining()
+        if n_rem <= 0:
+            # Deterministic: C already settled in principle.
+            return 100.0 if self._running_sum >= K else 0.0
+        mean_sum = self._running_sum + n_rem * self._x_prior_mean
+        sig_sum = math.sqrt(max(n_rem * self._x_prior_var, 1e-9))
+        if sig_sum < 1e-6:
+            return 100.0 if mean_sum >= K else 0.0
+        z = (mean_sum - float(K)) / sig_sum
+        p_ge = 0.5 * (1.0 + math.erf(z / math.sqrt(2.0)))
+        return 100.0 * p_ge
+
+    def fair_c_prior(self) -> Optional[float]:
+        """Public accessor for `_fair_c_prior` (thread-safe)."""
+        with self._lock:
+            return self._fair_c_prior()
+
+    def prior_a_from_strike(self) -> Optional[float]:
+        """Soft point estimate of truth_a derived from the strike: K
+        is "reasonable in comparison to the true value" (game-design
+        choice keeps P(sum>=K) in the interesting range), so K is a
+        weak prior on E[sum_total]. Returns K, or None if unset.
+
+        Caller should treat this as a HINT (uncertainty ~ x_prior_var
+        × n_total), not a locked truth. Used by `truth_status_str`
+        and is available to MM for sanity checks; we do NOT pin
+        `_bounds["A"]` to K because the user's caveat ("not always
+        the case") forbids treating it as ground truth."""
+        with self._lock:
+            return float(self.c_strike) if self.c_strike is not None else None
 
     def set_c_strike(self, k: Optional[int]) -> None:
         with self._lock:
@@ -327,6 +431,19 @@ class BotIntelligence:
                 d.lower = seen_range
                 d.lower_src = f"range@{self._reveals_seen}"
 
+            # Mid-round C pin from strike: once running_sum >= K, C
+            # is GUARANTEED 100 (regardless of remaining reveals). This
+            # mirrors v20's identity table but lives in the inferrer
+            # so the truth-cache refresh on the next tick picks it up
+            # without an oracle fill.
+            if self.c_strike is not None:
+                c = self._bounds["C"]
+                if self._running_sum >= self.c_strike:
+                    c.lower = c.upper = 100.0
+                    c.lower_src = c.upper_src = (
+                        f"running_sum({self._running_sum:.0f})"
+                        f">=K({self.c_strike})")
+
             # End-of-round pin.
             if n_total is not None and window_idx_after >= n_total > 0:
                 a.lower = a.upper = self._running_sum
@@ -354,19 +471,20 @@ class BotIntelligence:
 
         If WE sold at P to CP (cp bought from us) and CP is informed,
         then CP thinks `truth >= P + edge` → lower bound on truth.
+
+        Side effects beyond the truth bound:
+          * append a `_BotInteraction` to the interaction log so the
+            't' command and adverse-detection queries can scan recent
+            fills by counterparty.
+          * if CP is informed (oracle or informed_*), mark
+            `_adverse_until[(sym, our_side)]` so the MM widens that
+            side for `_widen_duration_sec`.
         """
         sym = msg.get("symbol")
         if sym not in ("A", "B", "C", "D"):
             return
         cp = msg.get("counterparty")
         if not cp:
-            return
-        spec = self._bots_by_name.get(cp)
-        if not spec:
-            with self._lock:
-                self._unknown_cp_count += 1
-            return
-        if not self.is_informed(cp):
             return
         try:
             price = float(msg.get("price") or 0)
@@ -379,9 +497,48 @@ class BotIntelligence:
         if our_side not in ("buy", "sell"):
             return
 
+        spec = self._bots_by_name.get(cp)
+        cls = spec.get("class") if spec else ""
+        is_oracle = cls in ORACLE_CLASSES if cls else False
+        is_informed = (cls in ORACLE_CLASSES) or (cls in INFORMED_CLASSES) \
+            if cls else False
+        now = time.time()
+        inter = _BotInteraction(
+            t=now,
+            sym=sym,
+            our_side=our_side,
+            price=price,
+            qty=qty,
+            cp=cp,
+            cp_class=cls or "",
+            is_oracle=is_oracle,
+            is_informed=is_informed,
+        )
+
+        with self._lock:
+            # Always log the interaction so the 't' command surfaces
+            # who's trading with us, even for noise/dimer/naive bots.
+            self._interactions.append(inter)
+            if len(self._interactions) > self._interactions_cap:
+                # Drop oldest in chunks to amortise the cost.
+                drop = len(self._interactions) - self._interactions_cap
+                self._interactions = self._interactions[drop:]
+            self._interactions_by_cp.setdefault(cp, []).append(inter)
+            if not spec:
+                self._unknown_cp_count += 1
+
+            # Adverse mark — informed CP just picked off our `our_side`
+            # quote. Widen that side for a few seconds.
+            if is_informed and self._widen_duration_sec > 0.0:
+                self._adverse_until[(sym, our_side)] = \
+                    now + self._widen_duration_sec
+
+        # Non-informed fills carry no truth signal — but we still
+        # logged the interaction above. Bail before touching bounds.
+        if not is_informed:
+            return
+
         edge = self._edge_threshold_ticks(spec)
-        cls = spec.get("class")
-        is_oracle = cls in ORACLE_CLASSES
 
         # CP's side is the OPPOSITE of ours. Their inferred bound:
         #   cp_side == buy  → truth >= price + edge   (lower bound)
@@ -409,24 +566,38 @@ class BotIntelligence:
             else:
                 b.n_informed_fills += 1
             self._fill_count += 1
-            self._last_update_t = time.time()
+            self._last_update_t = now
 
             # Special handling for C (binary {0, 100}): collapse to
-            # the boundary as soon as any informed fill discriminates
-            # which side of 50 truth lies on (and the C strike is
-            # configured). One oracle fill is enough.
+            # the boundary as soon as a fill discriminates which side
+            # of the strike-aware fair the truth lies on.
+            #
+            # Breakpoint is the Normal-approx fair_c given the strike
+            # K and the reveals seen so far — NOT a hardcoded 50.
+            # Example: K=120, running_sum=80, n_rem=8, x_prior_mean=7
+            # → mean_sum=136, fair_c_prior ≈ 75. An informed sell at
+            # price 30 (which is below 50 but FAR below 75) tells us
+            # C=0 even though price >= 0 by definition.
+            #
+            # Oracle bots know truth exactly and trade with edge=0, so
+            # ANY direction trumps the breakpoint (oracle BUY → C=100,
+            # oracle SELL → C=0, regardless of price).
             if sym == "C":
-                # If CP BUYS at price > strike-implied breakpoint, C=100.
-                # If CP SELLS at price < breakpoint, C=0.
-                # Approximation: use 50 as the breakpoint if no other
-                # info (C settles 0 or 100; mid is 50).
-                bp = 50.0
-                if our_side == "sell" and price >= bp:
+                fp = self._fair_c_prior()
+                bp = fp if fp is not None else 50.0
+                # Asymmetric band so we don't collapse on ambiguous
+                # mid-fair fills. Oracle skips the band entirely.
+                band = 0.0 if is_oracle else max(2.0, edge + 1.0)
+                if our_side == "sell" and price >= bp + band:
                     b.lower = b.upper = 100.0
-                    b.lower_src = b.upper_src = f"C-collapse:{cp}@{price:.0f}"
-                elif our_side == "buy" and price <= bp:
+                    b.lower_src = b.upper_src = (
+                        f"C-collapse:{cls}:{cp}@{price:.0f}"
+                        f"(bp={bp:.1f},band={band:.1f})")
+                elif our_side == "buy" and price <= bp - band:
                     b.lower = b.upper = 0.0
-                    b.lower_src = b.upper_src = f"C-collapse:{cp}@{price:.0f}"
+                    b.lower_src = b.upper_src = (
+                        f"C-collapse:{cls}:{cp}@{price:.0f}"
+                        f"(bp={bp:.1f},band={band:.1f})")
 
     # ------------------------------------------------------------------
     # Truth-API surface — mirrors TruthOracle
@@ -484,8 +655,105 @@ class BotIntelligence:
                 return None
             return 0.5 * (b.lower + b.upper)
 
+    # ------------------------------------------------------------------
+    # Adverse-pressure queries — used by the MM `_width_for` override.
+    # ------------------------------------------------------------------
+    def is_adverse(self, sym: str,
+                   our_side: Optional[str] = None,
+                   now: Optional[float] = None) -> bool:
+        """Did an informed CP pick off our `our_side` quote in `sym`
+        within the last `_widen_duration_sec`?
+
+        If `our_side` is None, returns True if EITHER side is adverse
+        (caller wants to widen the whole symbol)."""
+        t = now if now is not None else time.time()
+        with self._lock:
+            if our_side in ("buy", "sell"):
+                exp = self._adverse_until.get((sym, our_side), 0.0)
+                return exp > t
+            for side in ("buy", "sell"):
+                if self._adverse_until.get((sym, side), 0.0) > t:
+                    return True
+            return False
+
+    def adverse_remaining(self, sym: str,
+                          our_side: Optional[str] = None,
+                          now: Optional[float] = None) -> float:
+        """Seconds remaining on the strongest active adverse mark for
+        `sym` (0.0 if not adverse). Diagnostic only."""
+        t = now if now is not None else time.time()
+        with self._lock:
+            sides = ("buy", "sell") if our_side is None else (our_side,)
+            remaining = 0.0
+            for s in sides:
+                exp = self._adverse_until.get((sym, s), 0.0)
+                r = exp - t
+                if r > remaining:
+                    remaining = r
+            return remaining
+
+    def informed_pressure_for(self, sym: str, side: str,
+                              window_sec: float,
+                              now: Optional[float] = None) -> int:
+        """Count of informed fills against `sym`/`side` within the
+        last `window_sec`. `side` is OUR side that got hit. Higher
+        count = stronger directional signal that the informed flow
+        believes truth is on the opposite side of our quote."""
+        if side not in ("buy", "sell"):
+            return 0
+        t = now if now is not None else time.time()
+        cutoff = t - max(0.0, float(window_sec))
+        with self._lock:
+            return sum(
+                1 for it in self._interactions
+                if it.is_informed and it.sym == sym
+                and it.our_side == side and it.t >= cutoff
+            )
+
+    def cp_summary(self, window_sec: Optional[float] = None,
+                   limit: int = 12,
+                   now: Optional[float] = None) -> List[Dict]:
+        """Aggregate per-counterparty fill summary, most-recent first.
+
+        Returns up to `limit` entries; each row has cp, class,
+        is_informed, n, last_t, syms (set), and signed_qty (sells - buys
+        from our side, so + means we bought net from them)."""
+        t = now if now is not None else time.time()
+        cutoff = (t - float(window_sec)) if window_sec is not None else 0.0
+        with self._lock:
+            rows: List[Dict] = []
+            for cp, lst in self._interactions_by_cp.items():
+                recent = [it for it in lst if it.t >= cutoff]
+                if not recent:
+                    continue
+                signed = 0
+                syms = set()
+                for it in recent:
+                    syms.add(it.sym)
+                    signed += it.qty if it.our_side == "buy" else -it.qty
+                last = recent[-1]
+                rows.append({
+                    "cp": cp,
+                    "cls": last.cp_class,
+                    "is_informed": last.is_informed,
+                    "is_oracle": last.is_oracle,
+                    "n": len(recent),
+                    "last_t": last.t,
+                    "syms": syms,
+                    "signed_qty": signed,
+                })
+            rows.sort(key=lambda r: (-int(r["is_informed"]),
+                                     -r["n"], -r["last_t"]))
+            return rows[:max(0, int(limit))]
+
     def stats(self) -> Dict:
         with self._lock:
+            now = time.time()
+            adverse = {
+                f"{sym}:{side}": max(0.0, exp - now)
+                for (sym, side), exp in self._adverse_until.items()
+                if exp > now
+            }
             return {
                 "cached": False,
                 "fetches": 0,
@@ -493,6 +761,9 @@ class BotIntelligence:
                 "last_err": self._last_err,
                 "fills_ingested": self._fill_count,
                 "unknown_cp_fills": self._unknown_cp_count,
+                "interactions": len(self._interactions),
+                "counterparties": len(self._interactions_by_cp),
+                "adverse": adverse,
                 "bounds": {
                     s: {
                         "lower": self._bounds[s].lower,
@@ -518,6 +789,16 @@ class Config(ConfigV20):
 
     # Bot-config path (override if running outside the repo layout).
     bot_config_path: Optional[str] = None
+
+    # ---- v21 adverse-fill widening ----
+    # When an informed CP picks off one of our quotes, widen that
+    # symbol's MM for a few seconds. Keeps us out of repeat fills
+    # against a bot that has a directional view we haven't priced yet.
+    informed_widen_enabled: bool = True
+    informed_widen_duration_sec: float = 4.0
+    informed_widen_extra_ticks: int = 3
+    # Window for `informed_pressure_for` (diagnostics + future use).
+    informed_pressure_window_sec: float = 8.0
 
 
 # ===========================================================================
@@ -574,8 +855,18 @@ class Strategy(StrategyV20):
         self.truth = self.bot_intel
 
         # Hand the C strike to the inferrer so it can pin C={0,100}
-        # at end-of-round.
+        # at end-of-round AND compute the strike-aware breakpoint for
+        # C collapse on informed fills.
         self.bot_intel.set_c_strike(self.c_strike)
+        # Wire the adverse-widen duration so update_from_fill knows
+        # how long to keep the (sym, side) flagged.
+        self.bot_intel.set_widen_duration(
+            float(getattr(self.cfg, "informed_widen_duration_sec", 4.0))
+        )
+        # Seed round geometry so `_fair_c_prior()` works from t=0
+        # (without it, fair_c_prior falls through to 50.0 and we lose
+        # the K-aware C-collapse precision).
+        self.bot_intel.set_round_params(n_total=self.n_total)
 
         # Recompute the C/D truth cache + identity table from whatever
         # the inferrer already has (typically empty — bounds populate
@@ -589,6 +880,28 @@ class Strategy(StrategyV20):
         print(f"[v21 INIT] truth source = BotIntelligence "
               f"(no /api/admin/truth)  bots="
               f"{len(self.bot_intel._bots_by_name)}")
+
+    # ==================================================================
+    # Override: widen the MM quote when an informed bot just picked us
+    # off. Adds `informed_widen_extra_ticks` on top of v20's `_width_for`
+    # for `informed_widen_duration_sec` after every informed fill.
+    # ==================================================================
+    def _width_for(self, sym: str) -> int:
+        base = super()._width_for(sym)
+        if not getattr(self.cfg, "informed_widen_enabled", True):
+            return base
+        bi = getattr(self, "bot_intel", None)
+        if bi is None:
+            return base
+        try:
+            if bi.is_adverse(sym):
+                extra = int(getattr(self.cfg,
+                                    "informed_widen_extra_ticks", 0))
+                if extra > 0:
+                    return base + extra
+        except Exception:
+            pass
+        return base
 
     # ==================================================================
     # Override: rebuild the v20 truth cache directly from the inferrer
@@ -716,21 +1029,27 @@ class Strategy(StrategyV20):
     # ==================================================================
     def on_phase_change(self, phase: Optional[str], reveals: list) -> None:
         prev_phase = self.phase
+        going_running = (phase == "running" and prev_phase != "running")
         # v20 already clears _fair_*_truth on running edge; we also need
         # to clear BotIntelligence so the next round starts from a
         # blank slate (otherwise C={0,100} bound from the prior round
         # would leak through).
-        if phase == "running" and prev_phase != "running":
+        if going_running:
             try:
                 self.bot_intel.reset()
-                # Re-seed strike (it can change between rounds).
-                self.bot_intel.set_c_strike(self.c_strike)
             except Exception as e:
                 print(f"[v21 BOT-INTEL:RESET-ERR] {type(e).__name__}: {e}")
         super().on_phase_change(phase, reveals)
-        # super().on_phase_change calls _refresh_cd_truth_cache for us
-        # on the running edge — but it does so with our overridden
-        # version, so the inferrer's (empty) state is what we'll read.
+        # super() runs _refresh_c_strike() before _refresh_cd_truth_cache,
+        # so self.c_strike is now the NEW round's K. Re-seed bot_intel
+        # AFTER super() so it picks up the refreshed K, not the stale
+        # one from the prior round.
+        if going_running:
+            try:
+                self.bot_intel.set_c_strike(self.c_strike)
+                self.bot_intel.set_round_params(n_total=self.n_total)
+            except Exception as e:
+                print(f"[v21 BOT-INTEL:RESEED-ERR] {type(e).__name__}: {e}")
 
     # ==================================================================
     # Override: status string for the runner's 's' / 't' commands.
@@ -743,9 +1062,14 @@ class Strategy(StrategyV20):
             return "no bot-intel"
         st = bi.stats()
         parts = [
-            f"fills_ingested={st['fills_ingested']}",
-            f"unknown_cp={st['unknown_cp_fills']}",
+            f"fills={st['fills_ingested']}/{st['interactions']}",
+            f"unk_cp={st['unknown_cp_fills']}",
+            f"cps={st['counterparties']}",
         ]
+        if bi.c_strike is not None:
+            fp = bi.fair_c_prior()
+            fp_s = f"{fp:.1f}" if fp is not None else "-"
+            parts.append(f"K={bi.c_strike} fairC*={fp_s}")
         for sym in ("A", "B", "C", "D"):
             b = st["bounds"][sym]
             lo = f"{b['lower']:.1f}" if b['lower'] is not None else "-"
@@ -753,4 +1077,29 @@ class Strategy(StrategyV20):
             nO = b['oracle_fills']
             nI = b['informed_fills']
             parts.append(f"{sym}:[{lo},{hi}]({nO}O/{nI}I)")
+        if st["adverse"]:
+            adv = ",".join(f"{k}@{v:.1f}s"
+                           for k, v in sorted(st["adverse"].items()))
+            parts.append(f"adv={adv}")
         return "  ".join(parts)
+
+    def cp_status_str(self, window_sec: float = 60.0,
+                      limit: int = 8) -> str:
+        """One-line top-counterparties summary for the 't' / 'b' command."""
+        bi = getattr(self, "bot_intel", None)
+        if bi is None:
+            return "no bot-intel"
+        rows = bi.cp_summary(window_sec=window_sec, limit=limit)
+        if not rows:
+            return f"(no fills in last {window_sec:.0f}s)"
+        out = []
+        now = time.time()
+        for r in rows:
+            tag = "O" if r["is_oracle"] else ("I" if r["is_informed"]
+                                              else "n")
+            syms = "".join(sorted(r["syms"]))
+            age = now - r["last_t"]
+            cls = r["cls"] or "?"
+            out.append(f"{r['cp']}({tag},{cls},{syms},n={r['n']},"
+                       f"q={r['signed_qty']:+d},Δ{age:.1f}s)")
+        return " | ".join(out)
